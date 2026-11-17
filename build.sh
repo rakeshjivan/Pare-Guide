@@ -20,6 +20,11 @@ rm -rf "$APP" build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build
 
 FLAGS=(-O -parse-as-library -swift-version 5)
+# Apple Intelligence (macOS 26+): link it weakly so the app still opens on macOS 14 and 15.
+SDK="$(xcrun --show-sdk-path)"
+if [ -d "$SDK/System/Library/Frameworks/FoundationModels.framework" ]; then
+  FLAGS+=(-Xlinker -weak_framework -Xlinker FoundationModels)
+fi
 if [ "${UNIVERSAL:-0}" = "1" ]; then
   echo "Building Pare Guide (Apple Silicon + Intel)…"
   for A in arm64 x86_64; do

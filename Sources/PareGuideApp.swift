@@ -222,7 +222,7 @@ struct HomeView: View {
                         tip("record.circle", "The window hides and recording starts after a 3-second countdown. A red dot in the menu bar shows the step count.")
                         tip("stop.circle", "Stop with **⌃⌥⌘S** or the menu bar dot. Pause with **⌃⌥⌘P**.")
                         tip("eye.slash", "Emails, phone and card numbers in screenshots are blurred automatically. Passwords are never recorded.")
-                        tip("sparkles", "Add an Anthropic or OpenAI key in Settings to have each step written for you.")
+                        tip("sparkles", "**Write with AI** rewords steps using your Claude subscription (through Claude Code) or Apple Intelligence. No API key needed.")
                     }
                     .padding(6)
                 }
@@ -276,14 +276,17 @@ struct SettingsView: View {
     @AppStorage("countdown") private var countdown = true
     @AppStorage("autoBlur") private var autoBlur = true
     @AppStorage("defaultZoom") private var defaultZoom = Zoom.some.rawValue
-    @AppStorage("aiProvider") private var providerRaw = AIProvider.anthropic.rawValue
+    @AppStorage("aiProvider") private var providerRaw = AIProvider.claudeCode.rawValue
     @AppStorage("aiLanguage") private var language = ""
     @AppStorage("voiceID") private var voiceID = ""
     @State private var key = ""
     @State private var model = ""
     @State private var saved = false
 
-    private var provider: AIProvider { AIProvider(rawValue: providerRaw) ?? .anthropic }
+    @State private var testing = false
+    @State private var testResult: String?
+
+    private var provider: AIProvider { AIProvider(rawValue: providerRaw) ?? .claudeCode }
 
     var body: some View {
         TabView {
@@ -306,22 +309,60 @@ struct SettingsView: View {
             .tabItem { Label("General", systemImage: "gearshape") }
 
             Form {
-                Picker("Provider", selection: $providerRaw) {
+                Picker("Write steps with", selection: $providerRaw) {
                     ForEach(AIProvider.allCases) { Text($0.rawValue).tag($0.rawValue) }
                 }
-                SecureField("API key", text: $key)
-                TextField("Model", text: $model, prompt: Text(provider.defaultModel))
+                switch provider {
+                case .claudeCode:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Uses the Claude Code app signed in to your Claude Pro or Max plan, so there's nothing extra to pay. Screenshots are sent to Claude with their blurs applied.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let path = ClaudeCLI.find() {
+                            Label("Claude Code found at \(path)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
+                        } else {
+                            Label("Claude Code isn't installed yet", systemImage: "exclamationmark.circle").foregroundStyle(.orange).font(.callout)
+                            Text("1. Open Terminal and paste the install command (Copy button below), then press Return.\n2. Type claude, press Return, and sign in with your Claude account.\n3. Come back here and click Test.")
+                                .font(.callout).fixedSize(horizontal: false, vertical: true)
+                            Button("Copy Install Command") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString("curl -fsSL https://claude.ai/install.sh | bash", forType: .string)
+                            }
+                        }
+                        HStack {
+                            Button(testing ? "Testing…" : "Test") {
+                                testing = true
+                                testResult = nil
+                                Task {
+                                    testResult = await ClaudeCLI.test()
+                                    testing = false
+                                }
+                            }
+                            .disabled(testing)
+                            if let r = testResult { Text(r).font(.callout).foregroundStyle(.secondary).lineLimit(3) }
+                        }
+                    }
+                    TextField("Model", text: $model, prompt: Text("sonnet"))
+                    Text("sonnet is a good balance. haiku uses less of your allowance; opus is the most capable. If Claude Code isn't available or your allowance runs out, Apple Intelligence takes over when it's switched on.")
+                        .font(.caption).foregroundStyle(.secondary)
+                case .apple:
+                    Text(AppleAI.status).font(.callout)
+                    Text("Free and private: runs on your Mac and works offline. It works from what was clicked (button names, app, window) rather than the screenshots, so wording is simpler than Claude's.")
+                        .font(.caption).foregroundStyle(.secondary)
+                case .anthropic, .openai:
+                    SecureField("API key", text: $key)
+                    TextField("Model", text: $model, prompt: Text(provider.defaultModel))
+                    Text("Needs API credits, which are billed separately from a Claude or ChatGPT subscription. The key stays in your Mac's Keychain.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 TextField("Write steps in", text: $language, prompt: Text("English"))
                 HStack {
                     Button("Save") {
-                        Keychain.set(key.trimmed, for: provider.keyAccount)
+                        if provider.needsKey { Keychain.set(key.trimmed, for: provider.keyAccount) }
                         UserDefaults.standard.set(model.trimmed, forKey: "aiModel-\(provider.keyAccount)")
                         saved = true
                     }
                     if saved { Text("Saved").foregroundStyle(.secondary) }
                 }
-                Text("Optional. Your key stays in your Mac's Keychain. When you ask for AI wording, each step's screenshot (with blurs applied) is sent to the provider you choose.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
             .tabItem { Label("AI", systemImage: "sparkles") }
@@ -337,11 +378,12 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 520, height: 400)
+        .frame(width: 560, height: 520)
     }
 
     private func loadKey() {
-        key = Keychain.get(provider.keyAccount) ?? ""
+        key = provider.needsKey ? (Keychain.get(provider.keyAccount) ?? "") : ""
+        testResult = nil
         model = UserDefaults.standard.string(forKey: "aiModel-\(provider.keyAccount)") ?? ""
         saved = false
     }

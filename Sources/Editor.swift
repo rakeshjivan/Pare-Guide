@@ -119,7 +119,7 @@ struct GuideEditor: View {
                 SettingsLink { Text("AI Settings…") }
             } label: { Label("Write with AI", systemImage: "sparkles") }
                 .disabled(busy != nil)
-                .help("Uses your own Anthropic or OpenAI key (Settings › AI)")
+                .help("Uses your Claude subscription, Apple Intelligence or an API key (Settings › AI)")
 
             Button { AutoBlur.scan(guideID: guideID, force: true) } label: {
                 Label("Blur Private Details", systemImage: "eye.slash")
@@ -154,37 +154,49 @@ struct GuideEditor: View {
     }
 
     private func writeWithAI(only: UUID?) {
-        guard AI.isReady else { errorText = "Add an API key in Settings › AI first."; return }
+        guard AI.isReady else { errorText = AI.notReadyMessage; return }
         let g = guide.wrappedValue
         store.update(g, forceSnapshot: true)
-        let targets = g.steps.enumerated().filter { only == nil || $0.element.id == only }
+        let targets = g.steps.enumerated().filter { (only == nil || $0.element.id == only) && $0.element.image != nil }
+        guard !targets.isEmpty else { return }
         errorText = nil
         aiTask = Task {
             defer { busy = nil; aiTask = nil }
-            for (n, (index, step)) in targets.enumerated() {
+            // Claude Code reads several screenshots per request; the others go one at a time.
+            let chunk = AI.provider == .claudeCode ? 8 : 1
+            var i = 0
+            while i < targets.count {
                 if Task.isCancelled { return }
-                busy = targets.count > 1 ? "Writing step \(n + 1) of \(targets.count)…" : "Writing step \(index + 1)…"
+                let slice = Array(targets[i..<min(i + chunk, targets.count)])
+                busy = targets.count == 1 ? "Writing step \(slice[0].offset + 1)…"
+                    : "Writing steps \(i + 1)–\(i + slice.count) of \(targets.count)…"
                 let zoom = g.zoom
-                let url = step.image.map { store.imageURL(guideID, $0) }
-                let picture = await Task.detached {
-                    url.flatMap(GuideStore.loadImage).flatMap { Renderer.render(step, base: $0, zoom: zoom, maxWidth: 1600) }
+                let inputs = slice.map { ($0.offset + 1, $0.element, $0.element.image.map { store.imageURL(guideID, $0) }) }
+                let jobs: [AIJob] = await Task.detached {
+                    inputs.compactMap { n, s, url -> AIJob? in
+                        guard let pic = url.flatMap(GuideStore.loadImage)
+                            .flatMap({ Renderer.render(s, base: $0, zoom: zoom, maxWidth: 1600) }) else { return nil }
+                        return AIJob(number: n, step: s, picture: pic)
+                    }
                 }.value
-                guard let picture else { continue }
                 do {
-                    let text = try await AI.describe(step, picture: picture, number: index + 1)
-                    guard !text.isEmpty else { continue }
-                    let b = stepBinding(step.id)
-                    b.wrappedValue.text = text
+                    let texts = try await AI.write(jobs)
+                    for (id, t) in texts where !t.isEmpty {
+                        let b = stepBinding(id)
+                        b.wrappedValue.text = t
+                    }
+                    if let note = AI.lastNote { errorText = note }
                 } catch {
                     if !Task.isCancelled { errorText = error.localizedDescription }
                     return
                 }
+                i += chunk
             }
         }
     }
 
     private func writeTitle() {
-        guard AI.isReady else { errorText = "Add an API key in Settings › AI first."; return }
+        guard AI.isReady else { errorText = AI.notReadyMessage; return }
         busy = "Writing title…"
         errorText = nil
         Task {
