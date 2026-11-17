@@ -1,0 +1,498 @@
+// Editor — edit a recorded guide: titles, step wording, order, pictures (blur, crop, highlight),
+// AI wording, earlier versions, and export.
+
+import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+
+struct StepRef: Identifiable { let id: UUID }
+
+struct GuideEditor: View {
+    let guideID: UUID
+    @ObservedObject private var store = GuideStore.shared
+    @State private var editing: StepRef?
+    @State private var busy: String?
+    @State private var errorText: String?
+    @State private var scanning = false
+    @State private var aiTask: Task<Void, Never>?
+
+    private var guide: Binding<Guide> {
+        Binding(get: { store.guide(guideID) ?? Guide(title: "") },
+                set: { store.update($0) })
+    }
+
+    private func stepBinding(_ id: UUID) -> Binding<Step> {
+        Binding(get: { guide.wrappedValue.steps.first { $0.id == id } ?? Step(kind: .note, text: "") },
+                set: { new in
+                    var g = guide.wrappedValue
+                    if let i = g.steps.firstIndex(where: { $0.id == id }) { g.steps[i] = new; guide.wrappedValue = g }
+                })
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            List {
+                ForEach(Array(guide.wrappedValue.steps.enumerated()), id: \.element.id) { i, step in
+                    StepRow(guideID: guideID, step: stepBinding(step.id), number: i + 1, zoom: guide.wrappedValue.zoom,
+                            onEditPicture: { editing = StepRef(id: step.id) },
+                            onDelete: { delete(step.id) },
+                            onAI: { writeWithAI(only: step.id) })
+                        .listRowSeparator(.hidden)
+                        .padding(.vertical, 6)
+                }
+                .onMove { from, to in
+                    var g = guide.wrappedValue
+                    g.steps.move(fromOffsets: from, toOffset: to)
+                    store.update(g, forceSnapshot: true)
+                }
+                Button {
+                    var g = guide.wrappedValue
+                    g.steps.append(Step(kind: .note, text: "Add a note or tip here."))
+                    guide.wrappedValue = g
+                } label: { Label("Add a text-only step", systemImage: "plus") }
+                    .buttonStyle(.borderless)
+                    .padding(.vertical, 8)
+            }
+            .listStyle(.inset)
+            if busy != nil || errorText != nil || scanning { statusBar }
+        }
+        .toolbar { toolbar }
+        .sheet(item: $editing) { ref in
+            StepPictureEditor(guideID: guideID, step: stepBinding(ref.id))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .autoBlurChanged)) { _ in
+            scanning = AutoBlur.scanning.contains(guideID)
+        }
+        .onAppear { scanning = AutoBlur.scanning.contains(guideID) }
+        .onDisappear { aiTask?.cancel() }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Guide title", text: guide.title)
+                .textFieldStyle(.plain)
+                .font(.system(size: 24, weight: .bold))
+            TextField("Add a one-line summary (optional)", text: guide.summary, axis: .vertical)
+                .textFieldStyle(.plain)
+                .foregroundStyle(.secondary)
+            HStack {
+                Picker("Pictures", selection: guide.zoom) {
+                    ForEach(Zoom.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 420)
+                Spacer()
+                Text("\(guide.wrappedValue.steps.count) steps · drag to reorder · **bold** with double asterisks")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 8) {
+            if busy != nil || scanning { ProgressView().controlSize(.small) }
+            if let b = busy { Text(b) } else if scanning { Text("Checking screenshots for private details…") }
+            if let e = errorText {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text(e).lineLimit(2)
+            }
+            Spacer()
+            if aiTask != nil { Button("Stop") { aiTask?.cancel() } }
+            if errorText != nil { Button("Dismiss") { errorText = nil } }
+        }
+        .font(.callout)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItemGroup {
+            Menu {
+                Button("Write Every Step") { writeWithAI(only: nil) }
+                Button("Write Title and Summary") { writeTitle() }
+                Divider()
+                SettingsLink { Text("AI Settings…") }
+            } label: { Label("Write with AI", systemImage: "sparkles") }
+                .disabled(busy != nil)
+                .help("Uses your own Anthropic or OpenAI key (Settings › AI)")
+
+            Button { AutoBlur.scan(guideID: guideID, force: true) } label: {
+                Label("Blur Private Details", systemImage: "eye.slash")
+            }
+            .help("Find emails, phone and card numbers in every screenshot and blur them")
+
+            Menu {
+                let versions = store.versions(guideID)
+                if versions.isEmpty { Text("No earlier versions yet") }
+                ForEach(versions.prefix(25)) { v in
+                    Button(v.date.formatted(date: .abbreviated, time: .standard)) { store.restore(v, into: guideID) }
+                }
+            } label: { Label("Versions", systemImage: "clock.arrow.circlepath") }
+                .help("Roll back to an earlier version of this guide")
+
+            Menu {
+                ForEach(ExportFormat.allCases) { f in
+                    Button(f.rawValue) { export(f, narrate: false) }
+                    if f == .mp4 { Button("Video with narration (.mp4)") { export(.mp4, narrate: true) } }
+                }
+            } label: { Label("Export", systemImage: "square.and.arrow.up") }
+                .disabled(busy != nil || guide.wrappedValue.steps.isEmpty)
+        }
+    }
+
+    // MARK: Actions
+
+    private func delete(_ id: UUID) {
+        var g = guide.wrappedValue
+        g.steps.removeAll { $0.id == id }
+        store.update(g, forceSnapshot: true)
+    }
+
+    private func writeWithAI(only: UUID?) {
+        guard AI.isReady else { errorText = "Add an API key in Settings › AI first."; return }
+        let g = guide.wrappedValue
+        store.update(g, forceSnapshot: true)
+        let targets = g.steps.enumerated().filter { only == nil || $0.element.id == only }
+        errorText = nil
+        aiTask = Task {
+            defer { busy = nil; aiTask = nil }
+            for (n, (index, step)) in targets.enumerated() {
+                if Task.isCancelled { return }
+                busy = targets.count > 1 ? "Writing step \(n + 1) of \(targets.count)…" : "Writing step \(index + 1)…"
+                let zoom = g.zoom
+                let url = step.image.map { store.imageURL(guideID, $0) }
+                let picture = await Task.detached {
+                    url.flatMap(GuideStore.loadImage).flatMap { Renderer.render(step, base: $0, zoom: zoom, maxWidth: 1600) }
+                }.value
+                guard let picture else { continue }
+                do {
+                    let text = try await AI.describe(step, picture: picture, number: index + 1)
+                    guard !text.isEmpty else { continue }
+                    let b = stepBinding(step.id)
+                    b.wrappedValue.text = text
+                } catch {
+                    if !Task.isCancelled { errorText = error.localizedDescription }
+                    return
+                }
+            }
+        }
+    }
+
+    private func writeTitle() {
+        guard AI.isReady else { errorText = "Add an API key in Settings › AI first."; return }
+        busy = "Writing title…"
+        errorText = nil
+        Task {
+            defer { busy = nil }
+            do {
+                let (t, s) = try await AI.titleAndSummary(guide.wrappedValue)
+                var g = guide.wrappedValue
+                g.title = t
+                g.summary = s
+                store.update(g, forceSnapshot: true)
+            } catch { errorText = error.localizedDescription }
+        }
+    }
+
+    private func export(_ format: ExportFormat, narrate: Bool) {
+        let g = guide.wrappedValue
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        if format == .markdown {
+            panel.nameFieldStringValue = Exporter.safeName(g.title)
+            panel.message = "Pare Guide makes a folder with the Markdown file and its images."
+        } else {
+            panel.nameFieldStringValue = Exporter.safeName(g.title) + "." + format.ext
+            panel.allowedContentTypes = [UTType(filenameExtension: format.ext) ?? .data]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        busy = "Exporting…"
+        errorText = nil
+        Task {
+            defer { busy = nil }
+            do {
+                try await Exporter.run(format, guide: g, to: url, narrate: narrate) { msg in
+                    Task { @MainActor in if busy != nil { busy = msg } }
+                }
+                let shown = format == .markdown ? url.deletingPathExtension() : url
+                NSWorkspace.shared.activateFileViewerSelecting([shown])
+            } catch {
+                errorText = "Export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+// MARK: - One step in the list
+
+struct StepRow: View {
+    let guideID: UUID
+    @Binding var step: Step
+    let number: Int
+    let zoom: Zoom
+    let onEditPicture: () -> Void
+    let onDelete: () -> Void
+    let onAI: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text("\(number)")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color(cgColor: Renderer.accent)))
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Describe this step", text: $step.text, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                if !step.appName.isEmpty {
+                    Text([step.appName, step.windowTitle].filter { !$0.isEmpty }.joined(separator: " — "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if step.image != nil {
+                    StepPicture(guideID: guideID, step: step, zoom: zoom, maxWidth: 1100)
+                        .frame(maxWidth: 640, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+                        .onTapGesture(perform: onEditPicture)
+                        .help("Click to blur, crop or move the highlight")
+                }
+            }
+            Spacer(minLength: 0)
+            VStack(spacing: 6) {
+                if step.image != nil {
+                    Button(action: onEditPicture) { Image(systemName: "crop") }.help("Edit picture")
+                    Button(action: onAI) { Image(systemName: "sparkles") }.help("Write this step with AI")
+                }
+                Button(action: onDelete) { Image(systemName: "trash") }.help("Delete step")
+            }
+            .buttonStyle(.borderless)
+            .opacity(hovering ? 1 : 0.35)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
+/// The finished picture for a step, rendered in the background.
+struct StepPicture: View {
+    let guideID: UUID
+    let step: Step
+    let zoom: Zoom
+    var maxWidth = 1100
+    @State private var image: NSImage?
+
+    private var key: String {
+        "\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)"
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                Rectangle().fill(.quaternary).aspectRatio(16 / 10, contentMode: .fit)
+                    .overlay(ProgressView().controlSize(.small))
+            }
+        }
+        .task(id: key) {
+            guard let name = step.image else { return }
+            let url = GuideStore.shared.imageURL(guideID, name)
+            let s = step, z = zoom, m = maxWidth
+            let cg = await Task.detached(priority: .userInitiated) {
+                GuideStore.loadImage(url).flatMap { Renderer.render(s, base: $0, zoom: z, maxWidth: m) }
+            }.value
+            if let cg { image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)) }
+        }
+    }
+}
+
+// MARK: - Picture editor (blur, crop, highlight)
+
+struct StepPictureEditor: View {
+    let guideID: UUID
+    @Binding var step: Step
+    @Environment(\.dismiss) private var dismiss
+
+    enum Tool: String, CaseIterable, Identifiable {
+        case blur = "Blur", crop = "Crop", highlight = "Highlight"
+        var id: String { rawValue }
+        var help: String {
+            switch self {
+            case .blur: return "Drag over anything private. Click a blur box to remove it."
+            case .crop: return "Drag to choose the part of the screen to show."
+            case .highlight: return "Drag a box around the thing to click."
+            }
+        }
+    }
+
+    @State private var draft = Step(kind: .note, text: "")
+    @State private var tool: Tool = .blur
+    @State private var preview: NSImage?
+    @State private var pixelSize = CGSize(width: 16, height: 10)
+    @State private var dragStart: CGPoint?
+    @State private var dragNow: CGPoint?
+    @State private var detecting = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Picker("Tool", selection: $tool) {
+                    ForEach(Tool.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 280)
+                Text(tool.help).font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(12)
+
+            GeometryReader { geo in
+                let fit = fitted(pixelSize, in: geo.size)
+                let s = fit.width > 0 ? pixelSize.width / fit.width : 1
+                ZStack(alignment: .topLeading) {
+                    if let preview {
+                        Image(nsImage: preview).resizable().frame(width: fit.width, height: fit.height)
+                    } else {
+                        Rectangle().fill(.quaternary).frame(width: fit.width, height: fit.height).overlay(ProgressView())
+                    }
+                    // Crop: dim everything outside.
+                    if let c = draft.crop {
+                        let r = view(c, s)
+                        Path { p in
+                            p.addRect(CGRect(origin: .zero, size: fit))
+                            p.addRect(r)
+                        }
+                        .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
+                        Rectangle().strokeBorder(Color.white, lineWidth: 2)
+                            .frame(width: r.width, height: r.height).offset(x: r.minX, y: r.minY)
+                    }
+                    ForEach(Array(draft.blurs.enumerated()), id: \.offset) { _, b in
+                        let r = view(b, s)
+                        Rectangle().strokeBorder(Color.blue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                            .frame(width: r.width, height: r.height).offset(x: r.minX, y: r.minY)
+                    }
+                    if let a = dragStart, let b = dragNow {
+                        let r = rect(a, b)
+                        Rectangle().strokeBorder(tool == .blur ? Color.blue : tool == .crop ? Color.white : Color(cgColor: Renderer.accent),
+                                                 style: StrokeStyle(lineWidth: 2, dash: [6, 3]))
+                            .background(Color.white.opacity(0.08))
+                            .frame(width: r.width, height: r.height).offset(x: r.minX, y: r.minY)
+                    }
+                }
+                .frame(width: fit.width, height: fit.height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            dragStart = clamp(v.startLocation, fit)
+                            dragNow = clamp(v.location, fit)
+                        }
+                        .onEnded { v in
+                            let a = clamp(v.startLocation, fit), b = clamp(v.location, fit)
+                            dragStart = nil
+                            dragNow = nil
+                            finishDrag(a, b, scale: s)
+                        }
+                )
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+            }
+            .padding(.horizontal, 12)
+
+            HStack {
+                Toggle("Show highlight", isOn: $draft.showHighlight)
+                Button("Remove all blurs") { draft.blurs = [] }.disabled(draft.blurs.isEmpty)
+                Button("Find private details") { detect() }.disabled(detecting)
+                if detecting { ProgressView().controlSize(.small) }
+                Button("Reset crop") { draft.crop = nil }.disabled(draft.crop == nil)
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Done") { step = draft; dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(minWidth: 980, idealWidth: 1200, minHeight: 680, idealHeight: 820)
+        .onAppear { draft = step }
+        .task(id: previewKey) { await renderPreview() }
+    }
+
+    private var previewKey: String { "\(draft.blurs)|\(String(describing: draft.highlight))|\(draft.showHighlight)|\(draft.image ?? "")" }
+
+    private func renderPreview() async {
+        guard let name = draft.image else { return }
+        let url = GuideStore.shared.imageURL(guideID, name)
+        var s = draft
+        s.crop = nil
+        let st = s
+        let result = await Task.detached(priority: .userInitiated) { () -> (CGImage, CGSize)? in
+            guard let base = GuideStore.loadImage(url),
+                  let out = Renderer.render(st, base: base, zoom: .off, maxWidth: 2400) else { return nil }
+            return (out, CGSize(width: base.width, height: base.height))
+        }.value
+        if let r = result {
+            pixelSize = r.1
+            preview = NSImage(cgImage: r.0, size: NSSize(width: r.0.width, height: r.0.height))
+        }
+    }
+
+    private func detect() {
+        guard let name = draft.image else { return }
+        let url = GuideStore.shared.imageURL(guideID, name)
+        detecting = true
+        Task {
+            let found = await Task.detached { GuideStore.loadImage(url).map(Sensitive.find) ?? [] }.value
+            for r in found where !draft.blurs.contains(where: { $0.contains(CGPoint(x: r.midX, y: r.midY)) }) {
+                draft.blurs.append(r)
+            }
+            detecting = false
+        }
+    }
+
+    private func finishDrag(_ a: CGPoint, _ b: CGPoint, scale s: CGFloat) {
+        let r = rect(a, b)
+        let px = CGRect(x: r.minX * s, y: r.minY * s, width: r.width * s, height: r.height * s)
+        let isClick = r.width < 4 && r.height < 4
+        switch tool {
+        case .blur:
+            if isClick {
+                let p = CGPoint(x: a.x * s, y: a.y * s)
+                if let i = draft.blurs.lastIndex(where: { $0.contains(p) }) { draft.blurs.remove(at: i) }
+            } else { draft.blurs.append(px) }
+        case .crop:
+            if !isClick { draft.crop = px }
+        case .highlight:
+            if isClick {
+                draft.clickPoint = CGPoint(x: a.x * s, y: a.y * s)
+            } else {
+                draft.highlight = px
+                draft.clickPoint = CGPoint(x: px.midX, y: px.midY)
+            }
+            draft.showHighlight = true
+        }
+    }
+
+    private func fitted(_ size: CGSize, in box: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return .zero }
+        let k = min(box.width / size.width, box.height / size.height)
+        return CGSize(width: size.width * k, height: size.height * k)
+    }
+
+    private func view(_ r: CGRect, _ s: CGFloat) -> CGRect {
+        CGRect(x: r.minX / s, y: r.minY / s, width: r.width / s, height: r.height / s)
+    }
+
+    private func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+    }
+
+    private func clamp(_ p: CGPoint, _ size: CGSize) -> CGPoint {
+        CGPoint(x: min(max(0, p.x), size.width), y: min(max(0, p.y), size.height))
+    }
+}
