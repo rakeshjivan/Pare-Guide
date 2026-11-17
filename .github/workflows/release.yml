@@ -16,6 +16,7 @@ jobs:
 
       - name: Load signing certificate
         id: sign
+        continue-on-error: true   # falls back to ad-hoc signing
         env:
           SIGNING_P12: ${{ secrets.SIGNING_P12 }}
           SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}

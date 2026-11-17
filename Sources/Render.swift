@@ -190,11 +190,12 @@ enum AutoBlur {
                 guard let img = GuideStore.loadImage(url) else { continue }
                 found[id] = Sensitive.find(in: img)
             }
+            let results = found
             await MainActor.run {
                 scanning.remove(guideID)
                 if var g = GuideStore.shared.guide(guideID) {
                     for i in g.steps.indices {
-                        guard let rects = found[g.steps[i].id] else { continue }
+                        guard let rects = results[g.steps[i].id] else { continue }
                         for r in rects where !g.steps[i].blurs.contains(where: { $0.intersects(r) && $0.contains(CGPoint(x: r.midX, y: r.midY)) }) {
                             g.steps[i].blurs.append(r)
                         }

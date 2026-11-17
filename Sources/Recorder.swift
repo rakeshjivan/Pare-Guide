@@ -711,18 +711,17 @@ final class FrameGrabber: NSObject, SCStreamOutput, SCStreamDelegate {
             let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try await stream.startCapture()
-            lock.lock()
-            feeds[ObjectIdentifier(stream)] = Feed(stream: stream, frame: d.frame, scale: scale)
-            lock.unlock()
+            lock.withLock { feeds[ObjectIdentifier(stream)] = Feed(stream: stream, frame: d.frame, scale: scale) }
         }
     }
 
     func stop() async {
-        lock.lock()
-        let streams = feeds.values.map(\.stream)
-        feeds = [:]
-        latestBuffers = [:]
-        lock.unlock()
+        let streams: [SCStream] = lock.withLock {
+            let s = feeds.values.map(\.stream)
+            feeds = [:]
+            latestBuffers = [:]
+            return s
+        }
         for s in streams { try? await s.stopCapture() }
     }
 

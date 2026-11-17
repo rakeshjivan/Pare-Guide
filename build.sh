@@ -90,7 +90,10 @@ rm -rf build
 # survive updates. Copies built here are signed ad hoc: after rebuilding you may need to switch
 # the two permissions off and on again in System Settings.
 IDENTITY="${SIGN_IDENTITY:--}"
-codesign --force --deep -s "$IDENTITY" ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} "$APP"
+if ! codesign --force --deep -s "$IDENTITY" ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} "$APP"; then
+  echo "Signing with '$IDENTITY' failed: signing ad hoc instead."
+  codesign --force --deep -s - "$APP"
+fi
 codesign -dr - "$APP" 2>&1 | tail -1
 
 # On GitHub's build machines, stop here (the workflow zips the app).
