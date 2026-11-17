@@ -284,6 +284,51 @@ struct PermissionRow: View {
     }
 }
 
+// MARK: - Connect Claude
+
+struct ClaudeConnectView: View {
+    @ObservedObject private var connect = ClaudeConnect.shared
+    @State private var code = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            switch connect.phase {
+            case .unknown:
+                ProgressView().controlSize(.small)
+            case .connected(let who):
+                Label(who.isEmpty ? "Connected to your Claude account" : "Connected as \(who)", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .installing:
+                HStack { ProgressView().controlSize(.small); Text("Installing Claude Code (about a minute)…") }
+            case .signingIn:
+                HStack { ProgressView().controlSize(.small); Text("Finish in your browser: **Continue with Google**, then **Authorize**.") }
+                if let url = connect.signInURL {
+                    Link("Browser didn't open? Click here to sign in", destination: url).font(.callout)
+                }
+                HStack {
+                    TextField("If the page shows a code, paste it here", text: $code)
+                    Button("Submit") { connect.submitCode(code); code = "" }.disabled(code.trimmed.isEmpty)
+                }
+                Button("Cancel") { connect.cancel() }.controlSize(.small)
+            case .failed(let msg):
+                Label(msg, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try Again") { connect.connect() }
+            case .notConnected:
+                Button {
+                    connect.connect()
+                } label: {
+                    Label("Connect Claude", systemImage: "link")
+                }
+                .buttonStyle(.borderedProminent)
+                Text("Installs Claude Code if needed, then opens claude.ai in your browser so you can sign in (Google works). One time per Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .task { await connect.refresh() }
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {
@@ -331,17 +376,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Uses the Claude Code app signed in to your Claude Pro or Max plan, so there's nothing extra to pay. Screenshots are sent to Claude with their blurs applied.")
                             .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        if let path = ClaudeCLI.find() {
-                            Label("Claude Code found at \(path)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
-                        } else {
-                            Label("Claude Code isn't installed yet", systemImage: "exclamationmark.circle").foregroundStyle(.orange).font(.callout)
-                            Text("1. Open Terminal and paste the install command (Copy button below), then press Return.\n2. Type claude, press Return, and sign in with your Claude account.\n3. Come back here and click Test.")
-                                .font(.callout).fixedSize(horizontal: false, vertical: true)
-                            Button("Copy Install Command") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("curl -fsSL https://claude.ai/install.sh | bash", forType: .string)
-                            }
-                        }
+                        ClaudeConnectView()
                         HStack {
                             Button(testing ? "Testing…" : "Test") {
                                 testing = true

@@ -47,7 +47,7 @@ Emails, phone numbers, card numbers, TFNs and Medicare-style numbers are found i
 
 Click **Write with AI** to reword every step, or the ✨ button for one step. **Write Title and Summary** names the guide for you. Choose how in **Settings › AI**:
 
-- **Claude subscription (default).** Uses the Claude Code tool signed in to your Claude Pro or Max plan, so there's nothing extra to pay and no API key. Claude reads each screenshot, with blurs applied. To set it up, open Terminal and run `curl -fsSL https://claude.ai/install.sh | bash`. Then type `claude`, sign in, and click **Test** in Settings. Pare Guide removes any `ANTHROPIC_API_KEY` before calling it, so use is never billed as API.
+- **Claude subscription (default).** Uses the Claude Code tool signed in to your Claude Pro or Max plan, so there's nothing extra to pay and no API key. Claude reads each screenshot, with blurs applied. To set it up, click **Connect Claude** in Settings › AI. Pare Guide installs Claude Code if needed and opens claude.ai in your browser so you can sign in (Google sign-in works). You do this once per Mac. Pare Guide removes any `ANTHROPIC_API_KEY` before calling it, so use is never billed as API.
 - **Apple Intelligence.** Free, on-device and offline (macOS 26 or later). It uses the recorded button names, app and window, not the screenshots. It also takes over automatically if Claude Code isn't available or your allowance runs out.
 - **Anthropic or OpenAI API key**, if you have API credits. The key is kept in your Mac's Keychain.
 
