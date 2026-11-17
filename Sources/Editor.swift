@@ -84,7 +84,7 @@ struct GuideEditor: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 420)
                 Spacer()
-                Text("\(guide.wrappedValue.steps.count) steps · drag to reorder · **bold** with double asterisks")
+                Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -251,6 +251,24 @@ struct StepRow: View {
     let onDelete: () -> Void
     let onAI: () -> Void
     @State private var hovering = false
+    @State private var isEditing = false
+    @FocusState private var focused: Bool
+
+    /// The step text with **bold** shown as bold.
+    private var rendered: AttributedString {
+        guard !step.text.trimmed.isEmpty else {
+            var a = AttributedString("Describe this step")
+            a.foregroundColor = .secondary
+            return a
+        }
+        var out = AttributedString()
+        for part in step.text.boldParts {
+            var a = AttributedString(part.text)
+            if part.bold { a.font = .system(size: 15, weight: .semibold) }
+            out += a
+        }
+        return out
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -260,9 +278,24 @@ struct StepRow: View {
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Color(cgColor: Renderer.accent)))
             VStack(alignment: .leading, spacing: 8) {
-                TextField("Describe this step", text: $step.text, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 15))
+                if isEditing {
+                    TextField("Describe this step", text: $step.text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15))
+                        .focused($focused)
+                        .onSubmit { isEditing = false }
+                        .onChange(of: focused) { _, now in if !now { isEditing = false } }
+                } else {
+                    Text(rendered)
+                        .font(.system(size: 15))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            isEditing = true
+                            DispatchQueue.main.async { focused = true }
+                        }
+                        .help("Click to edit. Put **double asterisks** around words to make them bold.")
+                }
                 if !step.appName.isEmpty {
                     Text([step.appName, step.windowTitle].filter { !$0.isEmpty }.joined(separator: " — "))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
