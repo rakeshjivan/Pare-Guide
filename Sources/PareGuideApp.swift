@@ -196,6 +196,12 @@ struct HomeView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                                 Button("Quit & Reopen") { relaunch() }.controlSize(.small)
                             }
+                            HStack {
+                                Text("Switched on but still asked? macOS is remembering an older copy of the app.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("Reset & Reopen") { resetPermissions() }.controlSize(.small)
+                                    .help("Clears Pare Guide's old permission entries, then reopens. Switch both on again afterwards.")
+                            }
                         }
                         .padding(8)
                     }
@@ -238,6 +244,14 @@ struct HomeView: View {
 
     private func tip(_ icon: String, _ text: LocalizedStringKey) -> some View {
         Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: icon).foregroundStyle(.secondary) }
+    }
+
+    /// Clears stale permission entries (left by an earlier, differently signed copy), then reopens.
+    private func resetPermissions() {
+        let id = Bundle.main.bundleIdentifier ?? "au.jivan.pareguide"
+        Tools.runQuick("/usr/bin/tccutil", ["reset", "Accessibility", id])
+        Tools.runQuick("/usr/bin/tccutil", ["reset", "ScreenCapture", id])
+        relaunch()
     }
 
     private func relaunch() {
