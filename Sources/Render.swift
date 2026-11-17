@@ -25,7 +25,7 @@ enum Renderer {
                 guard !r.isNull, r.width > 1, r.height > 1 else { continue }
                 let s = max(12, min(r.width, r.height) / 3)
                 let px = c.clampedToExtent()
-                    .applyingFilter("CIPixellate", ["inputScale": s, "inputCenter": CIVector(x: r.minX, y: r.minY)])
+                    .applyingFilter("CIPixellate", parameters: ["inputScale": s, "inputCenter": CIVector(x: r.minX, y: r.minY)])
                     .applyingGaussianBlur(sigma: Double(s) / 2)
                     .cropped(to: r)
                 c = px.composited(over: c)
