@@ -18,7 +18,7 @@ struct PareGuideApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
-                Button("New Recording") { Recorder.shared.start() }
+                Button("New Recording") { Recorder.shared.askWhatToRecord() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Button("Import Guide…") { RootView.importGuide() }
                     .keyboardShortcut("o")
@@ -99,7 +99,7 @@ struct RootView: View {
             .navigationSplitViewColumnWidth(min: 220, ideal: 270)
             .safeAreaInset(edge: .bottom) {
                 Button {
-                    recorder.start()
+                    recorder.askWhatToRecord()
                 } label: {
                     Label("New Recording", systemImage: "record.circle.fill")
                         .frame(maxWidth: .infinity)
@@ -146,6 +146,7 @@ struct RootView: View {
             recorder.onFinish = { id in selection = id }
             if let p = Self.pendingSelection { selection = p }
         }
+        .sheet(isPresented: $recorder.showPicker) { RecordPicker() }
         .onReceive(NotificationCenter.default.publisher(for: .selectGuide)) { _ in
             if let p = Self.pendingSelection { selection = p }
         }
@@ -224,7 +225,7 @@ struct HomeView: View {
                 }
 
                 Button {
-                    recorder.start()
+                    recorder.askWhatToRecord()
                 } label: {
                     Label("Start Recording", systemImage: "record.circle.fill")
                         .font(.title3.weight(.semibold))

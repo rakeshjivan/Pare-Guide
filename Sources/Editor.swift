@@ -77,7 +77,10 @@ struct GuideEditor: View {
         .onReceive(NotificationCenter.default.publisher(for: .autoBlurChanged)) { _ in
             scanning = AutoBlur.scanning.contains(guideID)
         }
-        .onAppear { scanning = AutoBlur.scanning.contains(guideID) }
+        .onAppear {
+            scanning = AutoBlur.scanning.contains(guideID)
+            if showNarration { PareVoice.warmUp() }   // so the first tutorial export starts quickly
+        }
         .onDisappear { aiTask?.cancel() }
     }
 

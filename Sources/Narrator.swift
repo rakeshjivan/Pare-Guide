@@ -8,6 +8,7 @@
 
 import AppKit
 import AVFoundation
+import CryptoKit
 
 enum NarratorKind: String, CaseIterable, Identifiable {
     case pareVoice = "Pare Voice (cloned voices)"
@@ -33,18 +34,62 @@ enum Narrator {
         kind == .pareVoice && PareVoice.isInstalled && PareVoice.selectedVoice != nil ? .pareVoice : .mac
     }
 
-    /// Reads `text` into a sound file in `folder` and returns the file and its length in seconds.
+    /// Reads `text` into a sound file and returns the file and its length in seconds.
+    /// Lines already read in the same voice and settings are reused, so re-exporting is quick.
     static func record(_ text: String, name: String, in folder: URL) async throws -> (URL, Double)? {
         let t = text.plain.trimmed
         guard !t.isEmpty else { return nil }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
         if effectiveKind == .pareVoice, let voice = PareVoice.selectedVoice {
-            let url = folder.appendingPathComponent(name + ".wav")
-            let secs = try await PareVoice.say(t, voice: voice, to: url)
-            return (url, secs)
+            let sample = VoiceLibrary.url(voice)
+            let stamp = (try? fm.attributesOfItem(atPath: sample.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            let key = hash("pv|\(voice)|\(stamp)|\(PareVoice.mode.engineName)|\(PareVoice.exaggeration)|\(PareVoice.cfg)|\(t)")
+            let cached = cacheFolder.appendingPathComponent(key + ".wav")
+            if let secs = duration(cached) { touch(cached); return (cached, secs) }
+            let secs = try await PareVoice.say(t, voice: voice, to: cached)
+            prune()
+            return (cached, secs)
         }
-        let url = folder.appendingPathComponent(name + ".caf")
-        let secs = try await Speech.write(t, to: url)
-        return secs > 0 ? (url, secs) : nil
+        let voiceID = UserDefaults.standard.string(forKey: "voiceID") ?? ""
+        let cached = cacheFolder.appendingPathComponent(hash("mac|\(voiceID)|\(t)") + ".caf")
+        if let secs = duration(cached) { touch(cached); return (cached, secs) }
+        let secs = try await Speech.write(t, to: cached)
+        return secs > 0 ? (cached, secs) : nil
+    }
+
+    // MARK: Narration cache (~/Library/Caches/Pare Guide/Narration)
+
+    static var cacheFolder: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Pare Guide/Narration", isDirectory: true)
+    }
+
+    private static func hash(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func duration(_ url: URL) -> Double? {
+        guard FileManager.default.fileExists(atPath: url.path), let f = try? AVAudioFile(forReading: url) else { return nil }
+        let secs = Double(f.length) / f.processingFormat.sampleRate
+        return secs > 0.1 ? secs : nil
+    }
+
+    private static func touch(_ url: URL) {
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    /// Keeps the 600 most recently used lines.
+    private static func prune() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: cacheFolder, includingPropertiesForKeys: [.contentModificationDateKey]),
+              files.count > 650 else { return }
+        let sorted = files.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a > b
+        }
+        for f in sorted.dropFirst(600) { try? fm.removeItem(at: f) }
     }
 
     static var summary: String {
@@ -124,6 +169,20 @@ enum PareVoice {
             if !p.isRunning { break }
         }
         throw PGError("The Pare Voice helper didn't start. See ~/Library/Logs/Pare Guide voice.log.")
+    }
+
+    /// Loads the voice model in the background so the first narration starts straight away.
+    static func warmUp() {
+        guard Narrator.effectiveKind == .pareVoice else { return }
+        Task.detached(priority: .utility) {
+            guard (try? await PareVoice.start()) != nil else { return }
+            var req = URLRequest(url: URL(string: "http://127.0.0.1:\(PareVoice.port)/warm")!)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 10
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["mode": PareVoice.mode.engineName])
+            _ = try? await URLSession.shared.data(for: req)
+        }
     }
 
     /// Stops the helper (when Pare Guide quits).

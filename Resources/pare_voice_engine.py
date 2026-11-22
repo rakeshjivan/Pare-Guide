@@ -186,6 +186,19 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "not found"})
 
     def do_POST(self):
+        if self.path == "/warm":
+            n = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            kind = req.get("mode", "turbo")
+
+            def warm():
+                try:
+                    with ENGINE.lock:
+                        ENGINE.load(kind)
+                except Exception as e:
+                    print("warm-up failed:", e, flush=True)
+            threading.Thread(target=warm, daemon=True).start()
+            return self.reply(200, {"ok": True})
         if self.path == "/addvoice":
             try:
                 n = int(self.headers.get("Content-Length", "0"))

@@ -19,6 +19,11 @@ final class Recorder: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var stepCount = 0
     @Published var lastError: String?
+    /// Shows the "What do you want to record?" sheet.
+    @Published var showPicker = false
+    @Published private(set) var target: RecordTarget = .screen
+    /// For "page only": how far the web page sits inside the browser window.
+    private var pageInsets: NSEdgeInsets?
 
     /// Called with the new guide's id when a recording ends.
     var onFinish: ((UUID) -> Void)?
@@ -50,8 +55,17 @@ final class Recorder: ObservableObject {
 
     // MARK: Start / stop
 
-    func start() {
+    /// Asks what to record (whole screen, one app or one window), then starts.
+    func askWhatToRecord() {
         guard state == .idle else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        showPicker = true
+    }
+
+    func start(target: RecordTarget = .screen) {
+        guard state == .idle else { return }
+        self.target = target
+        pageInsets = nil
         guard Permissions.accessibility, Permissions.screenRecording else {
             lastError = "Pare Guide needs Accessibility and Screen Recording permission first."
             return
@@ -68,6 +82,7 @@ final class Recorder: ObservableObject {
         lastError = nil
         showStatusItem()
         NSApp.hide(nil)
+        if let pid = target.pid { NSRunningApplication(processIdentifier: pid)?.activate(options: []) }
 
         let seconds = Prefs.countdown ? 3 : 0
         state = .countdown(seconds)
@@ -88,6 +103,10 @@ final class Recorder: ObservableObject {
     }
 
     private func beginTap() {
+        if case .window(let id, let pid, _, true) = target, let b = WindowList.bounds(id),
+           let w = WindowList.webArea(pid: pid, window: b) {
+            pageInsets = NSEdgeInsets(top: w.minY - b.minY, left: w.minX - b.minX, bottom: b.maxY - w.maxY, right: b.maxX - w.maxX)
+        }
         guard installTap() else {
             lastError = "Couldn't watch clicks. Check Accessibility permission in System Settings, then reopen Pare Guide."
             cancel()
@@ -237,6 +256,7 @@ final class Recorder: ObservableObject {
     private func click(at p: CGPoint, right: Bool, clickCount: Int) {
         let info = AX.element(at: p)
         if info.pid == ownPID { return }   // our own menu bar item / menus
+        guard accepts(click: p, pid: info.pid) else { return }   // outside the chosen app or window
         finishTyping()
         enableWebAccessibility(info.pid)
 
@@ -273,6 +293,7 @@ final class Recorder: ObservableObject {
     // MARK: Keys
 
     private func key(_ e: TapEvent) {
+        if let tp = target.pid, NSWorkspace.shared.frontmostApplication?.processIdentifier != tp { return }
         let hasCmd = e.flags.contains(.maskCommand) || e.flags.contains(.maskControl)
         if hasCmd {
             finishTyping()
@@ -364,11 +385,12 @@ final class Recorder: ObservableObject {
 
         if let shot = grabber.latest(at: point) {
             place(&step, shot: shot, point: point, element: element, markClick: markClick)
+            let picture = cropped(shot, step: &step)
             g.steps.append(step)
             guide = g
             stepCount = g.steps.count
             save()
-            saveImage(shot.image, stepID: step.id, folder: folder, name: Self.fileName(index, step.id))
+            saveImage(picture, stepID: step.id, folder: folder, name: Self.fileName(index, step.id))
         } else {
             // No live frame yet (just started, or a new screen): take a one-off screenshot.
             g.steps.append(step)
@@ -382,11 +404,52 @@ final class Recorder: ObservableObject {
                 guard let shot = try? await FrameGrabber.oneOff(at: point) else { return }
                 guard var g = guide, let i = g.steps.firstIndex(where: { $0.id == id }) else { return }
                 place(&g.steps[i], shot: shot, point: point, element: element, markClick: markClick)
+                let picture = cropped(shot, step: &g.steps[i])
                 guide = g
                 save()
-                saveImage(shot.image, stepID: id, folder: folder, name: Self.fileName(index, id))
+                saveImage(picture, stepID: id, folder: folder, name: Self.fileName(index, id))
             }
         }
+    }
+
+    // MARK: Chosen app or window
+
+    private func accepts(click p: CGPoint, pid: pid_t) -> Bool {
+        switch target {
+        case .screen:
+            return true
+        case .app(let tp, _):
+            let owner = pid > 0 ? pid : (NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)
+            return owner == tp
+        case .window(let id, let tp, _, _):
+            guard let b = WindowList.bounds(id), b.contains(p) else { return false }
+            return pid <= 0 || pid == tp
+        }
+    }
+
+    /// The part of the screenshot to keep (pixels), when recording one window.
+    private func cropRect(for shot: Shot) -> CGRect? {
+        guard case .window(let id, _, _, let page) = target, var b = WindowList.bounds(id) else { return nil }
+        if page, let i = pageInsets {
+            b = CGRect(x: b.minX + i.left, y: b.minY + i.top,
+                       width: b.width - i.left - i.right, height: b.height - i.top - i.bottom)
+        }
+        let s = shot.scale
+        let r = CGRect(x: (b.minX - shot.displayFrame.minX) * s, y: (b.minY - shot.displayFrame.minY) * s,
+                       width: b.width * s, height: b.height * s).integral
+            .intersection(CGRect(x: 0, y: 0, width: shot.image.width, height: shot.image.height))
+        return r.isNull || r.width < 60 || r.height < 60 ? nil : r
+    }
+
+    /// Crops the picture to the chosen window and moves the click and highlight to match.
+    private func cropped(_ shot: Shot, step: inout Step) -> CGImage {
+        guard let r = cropRect(for: shot), let img = shot.image.cropping(to: r) else { return shot.image }
+        if let c = step.clickPoint { step.clickPoint = CGPoint(x: c.x - r.minX, y: c.y - r.minY) }
+        if let h = step.highlight {
+            let m = h.offsetBy(dx: -r.minX, dy: -r.minY).intersection(CGRect(origin: .zero, size: r.size))
+            step.highlight = m.isNull || m.width < 2 || m.height < 2 ? nil : m
+        }
+        return img
     }
 
     private func place(_ step: inout Step, shot: Shot, point: CGPoint, element: CGRect?, markClick: Bool) {
