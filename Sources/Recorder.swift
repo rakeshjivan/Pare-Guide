@@ -62,9 +62,14 @@ final class Recorder: ObservableObject {
         showPicker = true
     }
 
-    func start(target: RecordTarget = .screen) {
+    /// Whether this recording also records your voice ("Talk while you record").
+    private var talk = false
+    @Published var narrationStatus: String?
+
+    func start(target: RecordTarget = .screen, talk: Bool = false) {
         guard state == .idle else { return }
         self.target = target
+        self.talk = talk
         pageInsets = nil
         guard Permissions.accessibility, Permissions.screenRecording else {
             lastError = "Pare Guide needs Accessibility and Screen Recording permission first."
@@ -114,6 +119,7 @@ final class Recorder: ObservableObject {
         }
         state = .recording
         lastActivity = Date()
+        if talk { SpokenNarration.shared.start() }
         refreshStatusItem()
         watchForIdle()
     }
@@ -174,6 +180,7 @@ final class Recorder: ObservableObject {
     }
 
     func cancel() {
+        SpokenNarration.shared.discard()
         removeTap()
         Task { await grabber.stop() }
         if let g = guide { GuideStore.shared.delete(g.id) }
@@ -186,9 +193,11 @@ final class Recorder: ObservableObject {
     private func finish() {
         removeStatusItem()
         state = .idle
+        let spoken = SpokenNarration.shared.stop()
         guard let g = guide else { bringBack(); return }
         guide = nil
         if g.steps.isEmpty {
+            if let sp = spoken { try? FileManager.default.removeItem(at: sp.0) }
             GuideStore.shared.delete(g.id)
             lastError = "Nothing was recorded."
             bringBack()
@@ -198,6 +207,29 @@ final class Recorder: ObservableObject {
         bringBack()
         onFinish?(g.id)
         if Prefs.autoBlur { AutoBlur.scan(guideID: g.id) }
+        if let sp = spoken { addSpokenNarration(guideID: g.id, audio: sp.0, began: sp.1) }
+    }
+
+    /// Turns what you said while recording into each step's narration (on this Mac).
+    private func addSpokenNarration(guideID: UUID, audio: URL, began: Date) {
+        narrationStatus = "Turning what you said into narration…"
+        Task {
+            defer { try? FileManager.default.removeItem(at: audio) }
+            do {
+                let words = try await SpokenNarration.transcribe(audio)
+                guard var g = GuideStore.shared.guide(guideID) else { narrationStatus = nil; return }
+                let lines = SpokenNarration.assign(words, recordingStart: began, steps: g.steps)
+                var n = 0
+                for i in g.steps.indices {
+                    if let l = lines[g.steps[i].id], (g.steps[i].narration ?? "").isEmpty { g.steps[i].narration = l; n += 1 }
+                }
+                GuideStore.shared.update(g, forceSnapshot: true)
+                narrationStatus = n == 0 ? "No speech was picked up while recording."
+                    : "Added what you said to \(n) step\(n == 1 ? "" : "s"). Use Write with AI › Polish My Spoken Narration to tidy it."
+            } catch {
+                narrationStatus = "Couldn't transcribe what you said: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func bringBack() {

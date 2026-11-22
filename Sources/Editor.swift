@@ -16,7 +16,8 @@ struct GuideEditor: View {
     @State private var scanning = false
     @State private var aiTask: Task<Void, Never>?
     @AppStorage("showNarration") private var showNarration = true
-    @AppStorage("editorGrid") private var grid = false
+    /// 0 Steps, 1 Grid, 2 Script.
+    @AppStorage("editorLayout") private var layout = 0
     @State private var picked = Set<UUID>()
     @State private var lastPicked: Int?
     /// Earlier states of this guide, newest last, for the Undo button.
@@ -51,7 +52,11 @@ struct GuideEditor: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if grid { gridView } else { listView }
+            switch layout {
+            case 1: gridView
+            case 2: scriptView
+            default: listView
+            }
             if let note = undoNote {
                 HStack {
                     Image(systemName: "arrow.uturn.backward.circle").foregroundStyle(.secondary)
@@ -206,7 +211,7 @@ struct GuideEditor: View {
                 Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if showNarration {
+            if showNarration || layout == 2 {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 10) {
                         Picker("Intro & outro", selection: brandChoice) {
@@ -220,10 +225,12 @@ struct GuideEditor: View {
                         Spacer()
                         Label(Narrator.summary, systemImage: "waveform").font(.caption).foregroundStyle(.secondary)
                     }
-                    NarrationField(label: "Intro", text: text(\.introNarration),
-                                   placeholder: "Spoken over the intro. Leave blank to read the title.")
-                    NarrationField(label: "Outro", text: text(\.outroNarration),
-                                   placeholder: "Spoken over the closing card (optional).")
+                    if layout != 2 {
+                        NarrationField(label: "Intro", text: text(\.introNarration),
+                                       placeholder: "Spoken over the intro. Leave blank to read the title.")
+                        NarrationField(label: "Outro", text: text(\.outroNarration),
+                                       placeholder: "Spoken over the closing card (optional).")
+                    }
                 }
                 .padding(.top, 4)
             }
@@ -252,12 +259,14 @@ struct GuideEditor: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem {
-            Picker("Layout", selection: $grid) {
-                Label("List", systemImage: "list.bullet").tag(false)
-                Label("Grid", systemImage: "square.grid.2x2").tag(true)
+            Picker("Layout", selection: $layout) {
+                Text("Steps").tag(0)
+                Text("Grid").tag(1)
+                Text("Script").tag(2)
             }
             .pickerStyle(.segmented)
-            .help("List to edit steps; Grid to see them all and delete several at once")
+            .frame(width: 210)
+            .help("Steps: edit each step · Grid: see them all and delete several · Script: write and hear the voiceover")
         }
         ToolbarItem {
             Button { undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
@@ -269,6 +278,8 @@ struct GuideEditor: View {
                 Button("Write Every Step") { writeWithAI(only: nil) }
                 Button("Write Title and Summary") { writeTitle() }
                 Button("Write Narration Script") { writeNarration() }
+                Button("Polish My Spoken Narration") { polishSpoken() }
+                    .help("Tidies what you said while recording into clean voiceover lines")
                 Divider()
                 SettingsLink { Text("AI Settings…") }
             } label: { Label("Write with AI", systemImage: "sparkles") }
@@ -396,6 +407,106 @@ struct GuideEditor: View {
                 if !Task.isCancelled { errorText = error.localizedDescription }
             }
         }
+    }
+
+    private func polishSpoken() {
+        guard AI.isReady else { errorText = AI.notReadyMessage; return }
+        busy = "Polishing your narration…"
+        errorText = nil
+        let g = guide.wrappedValue
+        remember("AI narration polish")
+        aiTask = Task {
+            defer { busy = nil; aiTask = nil }
+            do {
+                let lines = try await AI.polishSpoken(g)
+                var now = guide.wrappedValue
+                for i in now.steps.indices { if let l = lines[now.steps[i].id] { now.steps[i].narration = l } }
+                store.update(now, forceSnapshot: true)
+                showNarration = true
+                layout = 2
+            } catch {
+                if !Task.isCancelled { errorText = error.localizedDescription }
+            }
+        }
+    }
+
+    // MARK: Script: the whole voiceover in one place
+
+    private var scriptView: some View {
+        let g = guide.wrappedValue
+        let total = Narrator.estimate(g.introNarration ?? g.title)
+            + g.steps.reduce(0) { $0 + Narrator.estimate(($1.narration ?? "").isEmpty ? $1.text : $1.narration!) }
+            + Narrator.estimate(g.outroNarration ?? "")
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform").foregroundStyle(Color(cgColor: Renderer.accent))
+                Text("Voiceover script").font(.headline)
+                Text("about \(Self.duration(total)) of speaking").foregroundStyle(.secondary)
+                Spacer()
+                Text("Press ▶ Play to hear a line. Blank lines read the step text.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 10)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    scriptRow(badge: "Intro", picture: nil) {
+                        NarrationField(label: nil, text: text(\.introNarration),
+                                       placeholder: g.title.plain.isEmpty ? "Spoken over the intro" : g.title.plain,
+                                       context: g.title.plain, full: true)
+                    }
+                    ForEach(Array(g.steps.enumerated()), id: \.element.id) { i, step in
+                        scriptRow(badge: "\(i + 1)", picture: step) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(step.text.plain.isEmpty ? "(no step text)" : step.text.plain)
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                NarrationField(label: nil,
+                                               text: Binding(get: { stepBinding(step.id).wrappedValue.narration ?? "" },
+                                                             set: { v in stepBinding(step.id).wrappedValue.narration = v.isEmpty ? nil : v }),
+                                               placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
+                                               context: g.title.plain, full: true)
+                            }
+                        }
+                    }
+                    scriptRow(badge: "Outro", picture: nil) {
+                        NarrationField(label: nil, text: text(\.outroNarration),
+                                       placeholder: "Spoken over the closing card (optional)",
+                                       context: g.title.plain, full: true)
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .onDisappear { NarrationPlayer.shared.stop() }
+    }
+
+    private func scriptRow<C: View>(badge: String, picture: Step?, @ViewBuilder content: () -> C) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack(alignment: .topLeading) {
+                if let step = picture, step.image != nil {
+                    StepPicture(guideID: guideID, step: step, zoom: guide.wrappedValue.zoom, maxWidth: 320)
+                        .aspectRatio(16 / 10, contentMode: .fit)
+                } else {
+                    RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12))
+                        .aspectRatio(16 / 10, contentMode: .fit)
+                        .overlay(Image(systemName: picture == nil ? "film" : "text.alignleft").foregroundStyle(.secondary))
+                }
+                Text(badge)
+                    .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                    .padding(.horizontal, 7).frame(minWidth: 22, minHeight: 22)
+                    .background(Capsule().fill(Color(cgColor: Renderer.accent)))
+                    .padding(5)
+            }
+            .frame(width: 150)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    static func duration(_ s: Double) -> String {
+        let t = Int(s.rounded())
+        return t < 60 ? "\(t) sec" : "\(t / 60) min \(t % 60) sec"
     }
 
     private func export(_ format: ExportFormat, narrate: Bool) {
@@ -738,12 +849,25 @@ struct StepPictureEditor: View {
 
 
 /// One line of narration: what the narrator says. Blank uses the placeholder (the step text).
+/// `full` (Script view) adds the length, ▶ Play and Rewrite; otherwise just a compact ▶ Play.
 struct NarrationField: View {
     let label: String?
     @Binding var text: String
     let placeholder: String
+    var context: String = ""
+    var full = false
+    @ObservedObject private var player = NarrationPlayer.shared
+    @State private var rewriting = false
+    @State private var problem: String?
+
+    private var spoken: String { text.trimmed.isEmpty ? placeholder : text }
+    private var seconds: Double { Narrator.estimate(spoken) }
 
     var body: some View {
+        if full { big } else { compact }
+    }
+
+    private var compact: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "waveform").foregroundStyle(Color(cgColor: Renderer.accent)).font(.caption)
             if let label { Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 40, alignment: .leading) }
@@ -751,11 +875,91 @@ struct NarrationField: View {
                 .textFieldStyle(.plain)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            playButton(small: true)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
         .help("What the narrator says in tutorial videos. Leave blank to read the step text.")
     }
+
+    private var big: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(placeholder, text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15))
+                .lineLimit(2...6)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+            HStack(spacing: 10) {
+                playButton(small: false)
+                Menu {
+                    Button("Shorter") { rewrite("shorter and punchier") }
+                    Button("Friendlier") { rewrite("warmer and friendlier") }
+                    Button("More formal") { rewrite("more formal and professional") }
+                    Button("Fix wording") { rewrite("clearer, with grammar and wording fixed") }
+                } label: { Label("Rewrite", systemImage: "sparkles") }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(rewriting || spoken.trimmed.isEmpty)
+                    .help("Ask the AI to rewrite this line")
+                if rewriting { ProgressView().controlSize(.small); Text("Rewriting…").font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+                if seconds > 0 {
+                    Label("\(Int(seconds.rounded())) sec", systemImage: seconds > 12 ? "exclamationmark.triangle.fill" : "clock")
+                        .font(.caption)
+                        .foregroundStyle(seconds > 12 ? Color.orange : Color.secondary)
+                        .help(seconds > 12 ? "A long line — the step will stay on screen a while. Try Rewrite › Shorter."
+                                           : "About how long this line takes to say")
+                }
+            }
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder private func playButton(small: Bool) -> some View {
+        let busy = player.preparing == spoken
+        let on = player.playing == spoken
+        Button {
+            problem = nil
+            let line = spoken
+            Task {
+                do { try await player.toggle(line) }
+                catch { problem = "Couldn't play: \(error.localizedDescription)" }
+            }
+        } label: {
+            if small {
+                Image(systemName: busy ? "hourglass" : on ? "stop.fill" : "play.fill")
+            } else {
+                Label(busy ? "Preparing…" : on ? "Stop" : "Play",
+                      systemImage: busy ? "hourglass" : on ? "stop.fill" : "play.fill")
+            }
+        }
+        .buttonStyle(small ? AnyButtonStyle(.borderless) : AnyButtonStyle(.bordered))
+        .disabled(spoken.trimmed.isEmpty)
+        .help(on ? "Stop" : "Hear this line in your chosen voice")
+    }
+
+    private func rewrite(_ how: String) {
+        guard AI.isReady else { problem = AI.notReadyMessage; return }
+        problem = nil
+        rewriting = true
+        let line = spoken
+        Task {
+            defer { rewriting = false }
+            do { text = try await AI.rewriteLine(line, how: how, title: context) }
+            catch { problem = error.localizedDescription }
+        }
+    }
+}
+
+/// Lets one button switch between borderless and bordered.
+struct AnyButtonStyle: PrimitiveButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: PrimitiveButtonStyle>(_ s: S) { make = { AnyView(s.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
 

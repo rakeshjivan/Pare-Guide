@@ -626,19 +626,7 @@ extension AI {
         - outro: one short closing sentence (at most 16 words).
         Reply with ONLY this JSON and nothing else: {"intro": "...", "steps": ["...", ...], "outro": "..."}
         """
-        let reply: String
-        switch provider {
-        case .claudeCode:
-            if ClaudeCLI.find() != nil {
-                do { reply = try await ClaudeCLI.ask(prompt) }
-                catch {
-                    guard AppleAI.isAvailable else { throw error }
-                    reply = try await AppleAI.respond(prompt)
-                }
-            } else { reply = try await AppleAI.respond(prompt) }
-        case .apple: reply = try await AppleAI.respond(prompt)
-        case .anthropic, .openai: reply = try await send(prompt: prompt, image: nil, maxTokens: 2000)
-        }
+        let reply = try await askText(prompt)
         guard let start = reply.firstIndex(of: "{"), let end = reply.lastIndex(of: "}"), start < end,
               let data = String(reply[start...end]).data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -650,5 +638,69 @@ extension AI {
         return NarrationScript(intro: clean((obj["intro"] as? String) ?? "").plain,
                                steps: map,
                                outro: clean((obj["outro"] as? String) ?? "").plain)
+    }
+}
+
+
+extension AI {
+    /// Sends a text-only request through whichever AI is chosen in Settings.
+    static func askText(_ prompt: String, maxTokens: Int = 2000) async throws -> String {
+        switch provider {
+        case .claudeCode:
+            if ClaudeCLI.find() != nil {
+                do { return try await ClaudeCLI.ask(prompt) }
+                catch {
+                    guard AppleAI.isAvailable else { throw error }
+                    return try await AppleAI.respond(prompt)
+                }
+            }
+            return try await AppleAI.respond(prompt)
+        case .apple: return try await AppleAI.respond(prompt)
+        case .anthropic, .openai: return try await send(prompt: prompt, image: nil, maxTokens: maxTokens)
+        }
+    }
+
+    /// Rewrites one narration line (shorter, friendlier, more formal…).
+    static func rewriteLine(_ line: String, how: String, title: String) async throws -> String {
+        let prompt = """
+        This is one line of voiceover for a short tutorial video\(title.isEmpty ? "" : " called \"\(title)\"").
+        Rewrite it to be \(how). Keep the meaning and any button or field names. Natural spoken \(language), \
+        at most 20 words, no markdown, no quotation marks around it.
+        Line: \(line.plain)
+        Reply with ONLY the new line.
+        """
+        let out = clean(try await askText(prompt, maxTokens: 300)).plain.trimmed
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"\u{201C}\u{201D}"))
+        guard !out.isEmpty else { throw PGError("The AI didn't suggest anything. Try again.") }
+        return out
+    }
+
+    /// Tidies what you said while recording into clean narration, one line per step.
+    static func polishSpoken(_ guide: Guide) async throws -> [UUID: String] {
+        let steps = guide.steps
+        guard !steps.isEmpty else { return [:] }
+        let list = steps.enumerated().map { i, s in
+            "\(i + 1). Action: \(s.text.plain)\n   Presenter said: \((s.narration ?? "").isEmpty ? "(nothing)" : s.narration!.plain)"
+        }.joined(separator: "\n")
+        let prompt = """
+        These are the steps of a tutorial video\(guide.title.isEmpty ? "" : " called \"\(guide.title.plain)\"") and what \
+        the presenter said during each one (from speech-to-text, so it may be messy).
+        \(list)
+
+        Rewrite each into one clean, natural spoken line in \(language) for the voiceover. Keep the presenter's meaning, \
+        tone and wording where possible; fix grammar and remove false starts. Where they said nothing, write a short line \
+        from the action. At most 22 words each, no markdown, no step numbers.
+        Reply with ONLY this JSON: {"steps": ["...", ...]} with exactly \(steps.count) items.
+        """
+        let reply = try await askText(prompt)
+        guard let a = reply.firstIndex(of: "{"), let b = reply.lastIndex(of: "}"), a < b,
+              let data = String(reply[a...b]).data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let lines = obj["steps"] as? [String] else {
+            throw PGError("The AI's reply wasn't in the expected format. Try again.")
+        }
+        var out: [UUID: String] = [:]
+        for (s, l) in zip(steps, lines) where !l.trimmed.isEmpty { out[s.id] = clean(l).plain }
+        return out
     }
 }

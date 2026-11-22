@@ -56,6 +56,9 @@ Click **Write with AI** to reword every step, or the ✨ button for one step. **
 **Export › Tutorial Video** turns a guide into a narrated how-to video (1080p). The camera eases in on each click, a cursor glides to it and clicks (with a click sound), and each step appears as a caption. The video opens and closes with an intro and outro.
 
 - **Narration.** Click **Narration** in the toolbar to see what the narrator says for each step, plus an intro and outro line. Type your own, or use **Write with AI › Write Narration Script** to turn the steps into a natural spoken script. A blank line reads the step text.
+- **Script view.** Switch the toolbar to **Steps | Grid | Script**. Script shows every line of the voiceover next to its picture, with **▶ Play** to hear it in your chosen voice, **Rewrite** (Shorter, Friendlier, More formal, Fix wording) and how long it takes to say. Lines over 12 seconds turn orange.
+- **Talk while you record.** Turn it on when you start a recording and just explain what you're doing. Pare Guide turns your words into each step's narration (on your Mac, using Apple's speech recognition). **Write with AI › Polish My Spoken Narration** tidies it up.
+- **Pronunciation.** In **Settings › Voice › Pronunciation**, tell the narrator how to say tricky words (for example Pare → Pair).
 - **Voices.** Choose the narrator in **Settings › Voice**: a cloned voice with **Pare Voice**, or one of the Mac's built-in voices.
 - **Intros & outros.** The **Pare PDF** style is built in. Add your own in **Settings › Intros & Outros**: colours, a logo, a tagline and website, or your own intro and outro video clips. Pick one per guide, or **None**.
 

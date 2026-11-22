@@ -105,6 +105,8 @@ struct VoiceSettings: View {
                 }
             }
 
+            PronunciationSection()
+
             if let m = message {
                 Section { Text(m).font(.callout) }
             }
@@ -417,5 +419,40 @@ private struct Thumb: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+
+/// Words the narrator should say differently, e.g. Pare → Pair.
+struct PronunciationSection: View {
+    @State private var list = Pronunciations.all
+    @ObservedObject private var player = NarrationPlayer.shared
+
+    var body: some View {
+        Section {
+            ForEach($list) { $p in
+                HStack(spacing: 8) {
+                    TextField("Word", text: $p.word).frame(maxWidth: 160)
+                    Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                    TextField("Say it as", text: $p.sayAs)
+                    Button {
+                        let line = "This is how \(p.word) sounds."
+                        Task { try? await player.toggle(line) }
+                    } label: { Image(systemName: "play.fill") }
+                        .buttonStyle(.borderless)
+                        .disabled(p.word.trimmed.isEmpty || p.sayAs.trimmed.isEmpty)
+                        .help("Hear it")
+                    Button(role: .destructive) { list.removeAll { $0.id == p.id } } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help("Remove")
+                }
+            }
+            Button { list.append(Pronunciation(word: "", sayAs: "")) } label: { Label("Add a Word", systemImage: "plus") }
+        } header: {
+            Text("Pronunciation")
+        } footer: {
+            Text("If the narrator says a word wrongly, type how it sounds — for example Pare → Pair, or GC → G C.")
+        }
+        .onChange(of: list) { _, now in Pronunciations.all = now }
     }
 }

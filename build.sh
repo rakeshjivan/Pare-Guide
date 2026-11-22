@@ -70,7 +70,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>NSMicrophoneUsageDescription</key><string>Pare Guide records a short sample of your voice when you add a voice for narration.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Pare Guide records your voice when you add a narration voice, or when you talk while recording a guide.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Pare Guide turns what you say while recording into each step's narration, on this Mac.</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

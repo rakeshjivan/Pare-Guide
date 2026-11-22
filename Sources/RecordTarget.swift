@@ -96,6 +96,8 @@ struct RecordPicker: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("recordMode") private var mode = 0          // 0 screen, 1 app, 2 window
     @AppStorage("recordPageOnly") private var pageOnly = true
+    @AppStorage("talkWhileRecording") private var talk = false
+    @State private var problem: String?
     @State private var windows: [WindowList.Item] = []
     @State private var chosenWindow: CGWindowID?
     @State private var chosenApp: pid_t?
@@ -146,6 +148,16 @@ struct RecordPicker: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
 
+            Divider()
+            Toggle(isOn: $talk) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Talk while you record")
+                    Text("Explain each step out loud as you go. Your words become the narration, transcribed on this Mac.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let p = problem { Text(p).font(.callout).foregroundStyle(.orange) }
+
             HStack {
                 Button("Refresh List") { load() }.disabled(mode == 0)
                 Spacer()
@@ -181,7 +193,12 @@ struct RecordPicker: View {
         default:
             target = .screen
         }
-        dismiss()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { Recorder.shared.start(target: target) }
+        let withVoice = talk
+        Task {
+            if withVoice, let msg = await SpokenNarration.requestAccess() { problem = msg; return }
+            dismiss()
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            Recorder.shared.start(target: target, talk: withVoice)
+        }
     }
 }

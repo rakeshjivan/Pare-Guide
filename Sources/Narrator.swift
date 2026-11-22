@@ -37,7 +37,7 @@ enum Narrator {
     /// Reads `text` into a sound file and returns the file and its length in seconds.
     /// Lines already read in the same voice and settings are reused, so re-exporting is quick.
     static func record(_ text: String, name: String, in folder: URL) async throws -> (URL, Double)? {
-        let t = text.plain.trimmed
+        let t = Pronunciations.apply(text.plain.trimmed)
         guard !t.isEmpty else { return nil }
         let fm = FileManager.default
         try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
@@ -210,5 +210,84 @@ enum PareVoice {
             throw PGError("Pare Voice: \((json?["error"] as? String) ?? "no answer")")
         }
         return secs
+    }
+}
+
+// MARK: - Pronunciation list
+
+/// How a word should be said, e.g. "Pare" → "Pair". Applied to every line before it's spoken.
+struct Pronunciation: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var word: String
+    var sayAs: String
+}
+
+enum Pronunciations {
+    static var all: [Pronunciation] {
+        get {
+            guard let d = UserDefaults.standard.data(forKey: "pronunciations"),
+                  let list = try? JSONDecoder().decode([Pronunciation].self, from: d) else {
+                return [Pronunciation(word: "Pare", sayAs: "Pair")]
+            }
+            return list
+        }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: "pronunciations") }
+    }
+
+    static func apply(_ s: String) -> String {
+        var out = s
+        for p in all where !p.word.trimmed.isEmpty && !p.sayAs.trimmed.isEmpty {
+            let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: p.word.trimmed) + "(?![\\p{L}\\p{N}])"
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out),
+                                              withTemplate: NSRegularExpression.escapedTemplate(for: p.sayAs.trimmed))
+        }
+        return out
+    }
+}
+
+extension Narrator {
+    /// Roughly how long a line takes to say (about 155 words a minute).
+    static func estimate(_ s: String) -> Double {
+        let words = s.plain.split { $0.isWhitespace }.count
+        return words == 0 ? 0 : Double(words) / 2.6 + 0.3
+    }
+}
+
+// MARK: - Hearing a line
+
+@MainActor
+final class NarrationPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    static let shared = NarrationPlayer()
+    @Published private(set) var playing: String?
+    @Published private(set) var preparing: String?
+    private var player: AVAudioPlayer?
+
+    /// Plays a line in the chosen voice (or stops it if it's already playing).
+    func toggle(_ text: String) async throws {
+        if playing == text || preparing == text { stop(); return }
+        stop()
+        preparing = text
+        defer { if preparing == text { preparing = nil } }
+        let tmp = FileManager.default.temporaryDirectory
+        guard let r = try await Narrator.record(text, name: "preview", in: tmp) else { return }
+        guard preparing == text else { return }   // stopped while it was being made
+        let p = try AVAudioPlayer(contentsOf: r.0)
+        p.delegate = self
+        p.play()
+        player = p
+        preparing = nil
+        playing = text
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        playing = nil
+        preparing = nil
+    }
+
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in self.playing = nil }
     }
 }

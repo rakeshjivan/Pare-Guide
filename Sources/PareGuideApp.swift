@@ -118,6 +118,18 @@ struct RootView: View {
         } detail: {
             VStack(spacing: 0) {
                 UpdateBanner(busy: recorder.isBusy).padding(.horizontal, 12).padding(.top, 8)
+                if let note = recorder.narrationStatus {
+                    HStack {
+                        if note.hasSuffix("…") { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "waveform").foregroundStyle(.secondary) }
+                        Text(note).font(.callout)
+                        Spacer()
+                        Button { recorder.narrationStatus = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.1)))
+                    .padding(.horizontal, 12).padding(.top, 8)
+                }
                 if recorder.state == .recording || recorder.state == .paused {
                     HStack {
                         Image(systemName: "record.circle.fill").foregroundStyle(.red)
