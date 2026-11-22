@@ -32,7 +32,7 @@ if [ "${UNIVERSAL:-0}" = "1" ]; then
   done
   lipo -create "build/$EXE-arm64" "build/$EXE-x86_64" -output "$APP/Contents/MacOS/$EXE"
 else
-  echo "Building Pare Guide for $ARCH…"
+  echo "Building Pare Guide for ${ARCH}…"
   xcrun swiftc "${FLAGS[@]}" -target "${ARCH}-apple-macos${MIN}" Sources/*.swift -o "$APP/Contents/MacOS/$EXE"
 fi
 
