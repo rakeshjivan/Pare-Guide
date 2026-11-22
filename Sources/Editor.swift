@@ -19,6 +19,9 @@ struct GuideEditor: View {
     @AppStorage("editorGrid") private var grid = false
     @State private var picked = Set<UUID>()
     @State private var lastPicked: Int?
+    /// Earlier states of this guide, newest last, for the Undo button.
+    @State private var undoStack: [(guide: Guide, what: String)] = []
+    @State private var undoNote: String?
     @ObservedObject private var brands = BrandStore.shared
 
     private var guide: Binding<Guide> {
@@ -49,6 +52,22 @@ struct GuideEditor: View {
             header
             Divider()
             if grid { gridView } else { listView }
+            if let note = undoNote {
+                HStack {
+                    Image(systemName: "arrow.uturn.backward.circle").foregroundStyle(.secondary)
+                    Text(note)
+                    Spacer()
+                    if !undoStack.isEmpty && !note.hasPrefix("Undid") { Button("Undo") { undo() }.buttonStyle(.borderedProminent) }
+                    Button { undoNote = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
+                }
+                .font(.callout)
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(.bar)
+                .task(id: note) {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                    if undoNote == note { undoNote = nil }
+                }
+            }
             if busy != nil || errorText != nil || scanning { statusBar }
         }
         .toolbar { toolbar }
@@ -99,6 +118,21 @@ struct GuideEditor: View {
         .onChange(of: steps.map(\.id)) { _, ids in picked.formIntersection(ids) }
     }
 
+    /// Call before a change so Undo can bring the guide back.
+    private func remember(_ what: String) {
+        undoStack.append((guide.wrappedValue, what))
+        if undoStack.count > 40 { undoStack.removeFirst() }
+    }
+
+    private func undo() {
+        guard let last = undoStack.popLast() else { return }
+        var g = last.guide
+        g.id = guideID
+        store.update(g, forceSnapshot: true)
+        undoNote = "Undid: \(last.what)"
+        picked = []
+    }
+
     private func pick(_ i: Int, _ steps: [Step]) {
         let id = steps[i].id
         if NSEvent.modifierFlags.contains(.shift), let a = lastPicked, a < steps.count {
@@ -113,6 +147,9 @@ struct GuideEditor: View {
 
     private func deletePicked() {
         guard !picked.isEmpty else { return }
+        let n = picked.count
+        remember(n == 1 ? "delete step" : "delete \(n) steps")
+        undoNote = n == 1 ? "Deleted 1 step" : "Deleted \(n) steps"
         var g = guide.wrappedValue
         g.steps.removeAll { picked.contains($0.id) }
         store.update(g, forceSnapshot: true)   // Versions can bring them back
@@ -132,6 +169,7 @@ struct GuideEditor: View {
                         .padding(.vertical, 6)
                 }
                 .onMove { from, to in
+                    remember("move step")
                     var g = guide.wrappedValue
                     g.steps.move(fromOffsets: from, toOffset: to)
                     store.update(g, forceSnapshot: true)
@@ -218,6 +256,11 @@ struct GuideEditor: View {
             .pickerStyle(.segmented)
             .help("List to edit steps; Grid to see them all and delete several at once")
         }
+        ToolbarItem {
+            Button { undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                .disabled(undoStack.isEmpty)
+                .help(undoStack.last.map { "Undo \($0.what)" } ?? "Nothing to undo")
+        }
         ToolbarItemGroup {
             Menu {
                 Button("Write Every Step") { writeWithAI(only: nil) }
@@ -261,6 +304,8 @@ struct GuideEditor: View {
     // MARK: Actions
 
     private func delete(_ id: UUID) {
+        remember("delete step")
+        undoNote = "Deleted 1 step"
         var g = guide.wrappedValue
         g.steps.removeAll { $0.id == id }
         store.update(g, forceSnapshot: true)
@@ -269,6 +314,7 @@ struct GuideEditor: View {
     private func writeWithAI(only: UUID?) {
         guard AI.isReady else { errorText = AI.notReadyMessage; return }
         let g = guide.wrappedValue
+        remember("AI step wording")
         store.update(g, forceSnapshot: true)
         let targets = g.steps.enumerated().filter { (only == nil || $0.element.id == only) && $0.element.image != nil }
         guard !targets.isEmpty else { return }
@@ -310,6 +356,7 @@ struct GuideEditor: View {
 
     private func writeTitle() {
         guard AI.isReady else { errorText = AI.notReadyMessage; return }
+        remember("AI title")
         busy = "Writing title…"
         errorText = nil
         Task {
@@ -329,6 +376,7 @@ struct GuideEditor: View {
         busy = "Writing the narration script…"
         errorText = nil
         let g = guide.wrappedValue
+        remember("AI narration")
         store.update(g, forceSnapshot: true)
         let brand = brands.brand(g.brandID)
         aiTask = Task {
