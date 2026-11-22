@@ -33,6 +33,9 @@ final class Recorder: ObservableObject {
     private var lastClick: (id: UUID, point: CGPoint, time: Date)?
     private var axEnabledPIDs = Set<pid_t>()
     private let ownPID = ProcessInfo.processInfo.processIdentifier
+    /// When the last step was added; a recording with nothing new for 10 minutes stops by itself.
+    private var lastActivity = Date()
+    static let idleLimit: TimeInterval = 10 * 60
 
     var isBusy: Bool { state != .idle }
 
@@ -82,12 +85,41 @@ final class Recorder: ObservableObject {
             return
         }
         state = .recording
+        lastActivity = Date()
         refreshStatusItem()
+        watchForIdle()
+    }
+
+    /// Safety net: stop a recording that has been left running with nothing happening.
+    private func watchForIdle() {
+        Task {
+            while state == .recording || state == .paused {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if (state == .recording || state == .paused), Date().timeIntervalSince(lastActivity) > Self.idleLimit {
+                    stop()
+                    lastError = "Recording stopped by itself after 10 minutes with no new steps."
+                    return
+                }
+            }
+        }
+    }
+
+    /// Coming back to Pare Guide ends the recording, so it can never keep running in the background.
+    func appBecameActive() {
+        switch state {
+        case .countdown:
+            cancel()
+        case .recording, .paused:
+            stop()
+            lastError = "Recording stopped and saved because you came back to Pare Guide."
+        case .idle, .finishing:
+            break
+        }
     }
 
     func togglePause() {
         if state == .recording { finishTyping(); state = .paused }
-        else if state == .paused { state = .recording }
+        else if state == .paused { state = .recording; lastActivity = Date() }
         refreshStatusItem()
     }
 
@@ -305,6 +337,7 @@ final class Recorder: ObservableObject {
     // MARK: Steps
 
     private func addStep(_ s: Step, point: CGPoint, element: CGRect?, markClick: Bool = true) {
+        lastActivity = Date()
         guard var g = guide else { return }
         var step = s
         let index = g.steps.count + 1

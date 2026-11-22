@@ -33,6 +33,10 @@ struct PareGuideApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated { Recorder.shared.appBecameActive() }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         PareVoice.stop()
         MainActor.assumeIsolated { Updater.shared.install(relaunch: false) }
@@ -114,6 +118,17 @@ struct RootView: View {
         } detail: {
             VStack(spacing: 0) {
                 UpdateBanner(busy: recorder.isBusy).padding(.horizontal, 12).padding(.top, 8)
+                if recorder.state == .recording || recorder.state == .paused {
+                    HStack {
+                        Image(systemName: "record.circle.fill").foregroundStyle(.red)
+                        Text("A recording is still running and is saving every click and keystroke.")
+                        Spacer()
+                        Button("Stop Recording") { recorder.stop() }.buttonStyle(.borderedProminent).tint(.red)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.12)))
+                    .padding(.horizontal, 12).padding(.top, 8)
+                }
                 if let id = selection, store.guide(id) != nil {
                     GuideEditor(guideID: id).id(id)
                 } else {
