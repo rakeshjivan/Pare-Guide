@@ -26,6 +26,14 @@ struct Brand: Codable, Identifiable, Equatable, Hashable {
     var builtIn = false
 
     static let noneID = "none"
+
+    /// Your own intro and outro: a slide (JPG/PNG) or a video (MP4/MOV) each.
+    var introFile: String? { get { introVideo } set { introVideo = newValue } }
+    var outroFile: String? { get { outroVideo } set { outroVideo = newValue } }
+    static func isImage(_ name: String?) -> Bool {
+        guard let ext = name?.split(separator: ".").last?.lowercased() else { return false }
+        return ["jpg", "jpeg", "png", "heic", "tif", "tiff"].contains(ext)
+    }
     static let pare = Brand(id: "pare", name: "Pare PDF", wordmark: "Pare PDF\u{2122}",
                             tagline: "Your files stay on your device.", website: "parepdf.app", builtIn: true)
 }
@@ -83,7 +91,7 @@ final class BrandStore: ObservableObject {
 
     func delete(_ id: String) {
         guard let b = custom.first(where: { $0.id == id }) else { return }
-        for f in [b.logo, b.introVideo, b.outroVideo].compactMap({ $0 }) {
+        for f in [b.logo, b.introFile, b.outroFile].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(f))
         }
         custom.removeAll { $0.id == id }

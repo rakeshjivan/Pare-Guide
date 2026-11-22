@@ -31,6 +31,7 @@ enum TutorialVideo {
         case step(StepShot)
         case note(number: Int, text: String)
         case clip(URL)
+        case slide(CGImage)
     }
 
     struct Shot {
@@ -77,10 +78,10 @@ enum TutorialVideo {
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
 
-        let (brand, logoURL, introClip, outroClip, jobs) = await MainActor.run { () -> (Brand?, URL?, URL?, URL?, [(Step, URL?)]) in
+        let (brand, logoURL, introFile, outroFile, jobs) = await MainActor.run { () -> (Brand?, URL?, URL?, URL?, [(Step, URL?)]) in
             let bs = BrandStore.shared
             let b = bs.brand(guide.brandID)
-            return (b, bs.fileURL(b?.logo), bs.fileURL(b?.introVideo), bs.fileURL(b?.outroVideo),
+            return (b, bs.fileURL(b?.logo), bs.fileURL(b?.introFile), bs.fileURL(b?.outroFile),
                     guide.steps.map { s in (s, s.image.map { GuideStore.shared.imageURL(guide.id, $0) }) })
         }
         let look = Look(brand: brand, logo: logoURL.flatMap(GuideStore.loadImage), guide: guide)
@@ -102,13 +103,20 @@ enum TutorialVideo {
             return try await Narrator.record(t, name: name, in: work)
         }
 
-        if brand != nil {
-            if let clip = introClip {
-                shots.append(Shot(content: .clip(clip), duration: try await clipDuration(clip)))
-            } else {
+        // Intro: the built-in designed card, or your own slide or video.
+        if let b = brand {
+            if b.builtIn {
                 let n = try await narrate(guide.introNarration ?? look.title, "intro")
                 shots.append(Shot(content: .card(intro: true), duration: max(3.2, 0.6 + (n?.1 ?? 0) + 0.7),
                                   narration: n?.0, narrationStart: 0.6))
+            } else if let f = introFile {
+                if Brand.isImage(f.lastPathComponent), let img = GuideStore.loadImage(f) {
+                    let n = try await narrate(guide.introNarration, "intro")
+                    shots.append(Shot(content: .slide(img), duration: max(3.5, 0.6 + (n?.1 ?? 0) + 0.7),
+                                      narration: n?.0, narrationStart: 0.6))
+                } else {
+                    shots.append(Shot(content: .clip(f), duration: try await clipDuration(f)))
+                }
             }
         }
         var stepIndex = 0
@@ -126,13 +134,20 @@ enum TutorialVideo {
             }
             shots.append(shot)
         }
-        if brand != nil {
-            if let clip = outroClip {
-                shots.append(Shot(content: .clip(clip), duration: try await clipDuration(clip)))
-            } else {
+        // Outro: the built-in designed card, or your own slide or video.
+        if let b = brand {
+            if b.builtIn {
                 let n = try await narrate(guide.outroNarration, "outro")
                 shots.append(Shot(content: .card(intro: false), duration: max(3.4, 0.5 + (n?.1 ?? 0) + 0.9),
                                   narration: n?.0, narrationStart: 0.5))
+            } else if let f = outroFile {
+                if Brand.isImage(f.lastPathComponent), let img = GuideStore.loadImage(f) {
+                    let n = try await narrate(guide.outroNarration, "outro")
+                    shots.append(Shot(content: .slide(img), duration: max(3.5, 0.5 + (n?.1 ?? 0) + 0.9),
+                                      narration: n?.0, narrationStart: 0.5))
+                } else {
+                    shots.append(Shot(content: .clip(f), duration: try await clipDuration(f)))
+                }
             }
         }
         guard !shots.isEmpty else { throw PGError("This guide has no steps with pictures yet.") }
@@ -310,6 +325,11 @@ enum TutorialVideo {
             text2(ctx, text.plain, font: .systemFont(ofSize: 56, weight: .semibold), color: look.text,
                   rect: CGRect(x: 240, y: 380, width: W - 480, height: 320), align: .center)
             badge(ctx, number, center: CGPoint(x: W / 2, y: 760), radius: 34, look: look)
+        case .slide(let img):
+            fill(ctx, .black, alpha: 1)
+            let s = min(W / CGFloat(img.width), H / CGFloat(img.height))
+            let w = CGFloat(img.width) * s, h = CGFloat(img.height) * s
+            ctx.draw(img, in: CGRect(x: (W - w) / 2, y: (H - h) / 2, width: w, height: h))
         case .clip:
             fill(ctx, .black, alpha: 1)
             if let img = clip?.frame(at: t) {

@@ -295,144 +295,127 @@ struct RecordVoiceSheet: View {
 
 struct BrandSettings: View {
     @ObservedObject private var store = BrandStore.shared
-    @State private var selected: String = Brand.pare.id
-    @State private var introPreview: NSImage?
-    @State private var outroPreview: NSImage?
-
-    private var current: Brand { store.all.first { $0.id == selected } ?? Brand.pare }
+    @State private var error: String?
 
     var body: some View {
         Form {
             Section {
-                Picker("Default for new videos", selection: Binding(get: { store.defaultID }, set: { store.defaultID = $0 })) {
+                Picker("Use by default", selection: Binding(get: { store.defaultID }, set: { store.defaultID = $0 })) {
                     ForEach(store.all) { Text($0.name).tag($0.id) }
                     Text("None").tag(Brand.noneID)
                 }
-                Text("Each guide can pick its own in the editor (Narration › Intro & outro).")
+                Text("Each guide can choose its own in the editor (Narration › Intro & outro).")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Styles") {
-                Picker("Edit", selection: $selected) {
-                    ForEach(store.all) { Text($0.name + ($0.builtIn ? " (built in)" : "")).tag($0.id) }
-                }
-                HStack {
-                    Button("Add a Style") {
-                        var b = Brand(name: "My brand", wordmark: "My brand")
-                        b.tagline = "Your tagline here."
-                        store.save(b)
-                        selected = b.id
-                    }
-                    Button("Duplicate") {
-                        var b = current
-                        b.id = UUID().uuidString
-                        b.name += " copy"
-                        b.builtIn = false
-                        b.logo = nil; b.introVideo = nil; b.outroVideo = nil
-                        store.save(b)
-                        selected = b.id
-                    }
-                    Spacer()
-                    if !current.builtIn {
-                        Button("Delete", role: .destructive) { store.delete(current.id); selected = Brand.pare.id }
-                    }
-                }
-            }
-            if current.builtIn {
-                Section { Text("The Pare PDF style is built in. Use Duplicate to make your own version.").foregroundStyle(.secondary) }
-            } else {
-                BrandEditor(brand: Binding(get: { current }, set: { store.save($0) }))
-            }
-            Section("Preview") {
+
+            Section("Pare PDF (built in)") {
                 HStack(spacing: 10) {
-                    previewBox(introPreview, "Intro")
-                    previewBox(outroPreview, "Outro")
+                    Thumb(image: designed(intro: true), label: "Intro")
+                    Thumb(image: designed(intro: false), label: "Outro")
                 }
+            }
+
+            ForEach(store.custom) { b in
+                Section {
+                    HStack {
+                        TextField("Name", text: Binding(get: { b.name }, set: { var c = b; c.name = $0; store.save(c) }))
+                            .font(.headline)
+                        Spacer()
+                        Button("Delete", role: .destructive) { store.delete(b.id) }
+                    }
+                    HStack(alignment: .top, spacing: 10) {
+                        slot(b, intro: true)
+                        slot(b, intro: false)
+                    }
+                }
+            }
+
+            Section {
+                Button("Add Your Own Intro & Outro") {
+                    store.save(Brand(name: "My intro & outro \(store.custom.count + 1)", wordmark: ""))
+                }
+                Text("Choose a slide (JPG or PNG) or a video (MP4 or MOV) for the intro and for the outro. Slides show for a few seconds with the intro or outro narration over them; videos play with their own sound (up to 30 seconds). 16:9 at 1920×1080 looks best.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let e = error { Text(e).foregroundStyle(.orange).font(.caption) }
             }
         }
         .formStyle(.grouped)
-        .task(id: current) { await renderPreviews() }
     }
 
-    private func previewBox(_ img: NSImage?, _ label: String) -> some View {
-        VStack(spacing: 4) {
-            Group {
-                if let img { Image(nsImage: img).resizable().aspectRatio(16 / 9, contentMode: .fit) }
-                else { Rectangle().fill(.quaternary).aspectRatio(16 / 9, contentMode: .fit) }
+    private func slot(_ b: Brand, intro: Bool) -> some View {
+        let name = intro ? b.introFile : b.outroFile
+        return VStack(spacing: 6) {
+            Thumb(image: preview(name), label: intro ? "Intro" : "Outro", empty: name == nil)
+            HStack(spacing: 6) {
+                Button(name == nil ? "Choose…" : "Change…") { choose(b, intro: intro) }
+                if name != nil {
+                    Button("Remove") {
+                        var c = b
+                        if let f = store.fileURL(name) { try? FileManager.default.removeItem(at: f) }
+                        if intro { c.introFile = nil } else { c.outroFile = nil }
+                        store.save(c)
+                    }
+                }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            .controlSize(.small)
         }
+        .frame(maxWidth: .infinity)
     }
 
-    private func renderPreviews() async {
-        let b = current
-        if b.introVideo != nil || b.outroVideo != nil {
-            // A clip replaces the designed card; show its first frame.
-            introPreview = b.introVideo.flatMap { store.fileURL($0) }.flatMap(firstFrame)
-            outroPreview = b.outroVideo.flatMap { store.fileURL($0) }.flatMap(firstFrame)
-        }
-        let logo = store.fileURL(b.logo).flatMap(GuideStore.loadImage)
+    private func choose(_ b: Brand, intro: Bool) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.jpeg, .png, .mpeg4Movie, .quickTimeMovie, .movie]
+        panel.message = "Choose a slide (JPG, PNG) or a video (MP4, MOV) for the \(intro ? "intro" : "outro")."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var c = b
+        let old = intro ? c.introFile : c.outroFile
+        do {
+            let kind = (intro ? "intro-" : "outro-") + String(UUID().uuidString.prefix(6))
+            let saved = try store.importFile(url, for: c.id, kind: kind)
+            if let o = store.fileURL(old) { try? FileManager.default.removeItem(at: o) }
+            if intro { c.introFile = saved } else { c.outroFile = saved }
+            store.save(c)
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func designed(intro: Bool) -> NSImage? {
         let size = CGSize(width: 640, height: 360)
-        let i = TutorialVideo.cardPreview(brand: b, logo: logo, intro: true, title: "How to compress a PDF", size: size)
-        let o = TutorialVideo.cardPreview(brand: b, logo: logo, intro: false, title: "How to compress a PDF", size: size)
-        if b.introVideo == nil { introPreview = i.map { NSImage(cgImage: $0, size: size) } }
-        if b.outroVideo == nil { outroPreview = o.map { NSImage(cgImage: $0, size: size) } }
+        return TutorialVideo.cardPreview(brand: .pare, logo: nil, intro: intro, title: "How to compress a PDF", size: size)
+            .map { NSImage(cgImage: $0, size: size) }
     }
 
-    private func firstFrame(_ url: URL) -> NSImage? {
+    private func preview(_ name: String?) -> NSImage? {
+        guard let url = store.fileURL(name) else { return nil }
+        if Brand.isImage(name) { return NSImage(contentsOf: url) }
         let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = CGSize(width: 640, height: 360)
         guard let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.5, preferredTimescale: 600), actualTime: nil) else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
 
-struct BrandEditor: View {
-    @Binding var brand: Brand
-    @State private var error: String?
+/// A 16:9 preview with a label underneath.
+private struct Thumb: View {
+    let image: NSImage?
+    let label: String
+    var empty = false
 
     var body: some View {
-        Section("Words") {
-            TextField("Style name", text: $brand.name)
-            TextField("Wordmark (big name on the intro)", text: $brand.wordmark)
-            TextField("Tagline (under the title, and on the outro)", text: $brand.tagline)
-            TextField("Website", text: $brand.website)
-        }
-        Section("Colours") {
-            colour("Background", \.background)
-            colour("Text", \.text)
-            colour("Accent (bar, clicks, highlight)", \.accent)
-            colour("Tagline", \.highlight)
-        }
-        Section("Logo and clips") {
-            fileRow("Logo (replaces the wordmark)", name: brand.logo, types: [.png, .jpeg, .heic, .tiff], kind: "logo") { brand.logo = $0 }
-            fileRow("Intro clip (replaces the intro card)", name: brand.introVideo, types: [.movie, .mpeg4Movie, .quickTimeMovie], kind: "intro") { brand.introVideo = $0 }
-            fileRow("Outro clip (replaces the outro card)", name: brand.outroVideo, types: [.movie, .mpeg4Movie, .quickTimeMovie], kind: "outro") { brand.outroVideo = $0 }
-            if let e = error { Text(e).foregroundStyle(.orange).font(.caption) }
-            Text("Clips play with their own sound, up to 30 seconds.").font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private func colour(_ label: String, _ kp: WritableKeyPath<Brand, String>) -> some View {
-        ColorPicker(label, selection: Binding(
-            get: { Color(hex: brand[keyPath: kp]) },
-            set: { brand[keyPath: kp] = NSColor($0).hex }), supportsOpacity: false)
-    }
-
-    private func fileRow(_ label: String, name: String?, types: [UTType], kind: String, set: @escaping (String?) -> Void) -> some View {
-        HStack {
-            Text(label)
-            Spacer()
-            Text(name == nil ? "None" : "Added").foregroundStyle(.secondary)
-            Button(name == nil ? "Choose…" : "Change…") {
-                let panel = NSOpenPanel()
-                panel.allowedContentTypes = types
-                guard panel.runModal() == .OK, let url = panel.url else { return }
-                do { set(try BrandStore.shared.importFile(url, for: brand.id, kind: kind)) }
-                catch { self.error = error.localizedDescription }
+        VStack(spacing: 4) {
+            Group {
+                if let image { Image(nsImage: image).resizable().aspectRatio(contentMode: .fit).background(Color.black) }
+                else {
+                    Rectangle().fill(.quaternary)
+                        .overlay(Text(empty ? "None" : "").font(.caption).foregroundStyle(.secondary))
+                }
             }
-            if name != nil { Button("Remove") { set(nil) } }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
+            Text(label).font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity)
     }
 }
