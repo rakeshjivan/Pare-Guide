@@ -134,14 +134,22 @@ final class Recorder: ObservableObject {
 
     func stop() {
         if state == .idle || state == .finishing { return }
-        finishTyping()
+        // Stop capturing immediately: no more clicks or keys are seen from this moment.
         removeTap()
+        finishTyping()
         state = .finishing
-        refreshStatusItem()
+        removeStatusItem()
+        let gr = grabber
         Task {
-            // Let screenshots that are still saving finish.
-            for _ in 0..<50 where pendingImages > 0 { try? await Task.sleep(nanoseconds: 100_000_000) }
-            await grabber.stop()
+            // Let screenshots that are already saving finish (at most 3 seconds).
+            for _ in 0..<30 where pendingImages > 0 { try? await Task.sleep(nanoseconds: 100_000_000) }
+            // Shut down screen capture, but never wait more than 3 seconds for it.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await gr.stop() }
+                group.addTask { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+                await group.next()
+                group.cancelAll()
+            }
             finish()
         }
     }
@@ -198,13 +206,14 @@ final class Recorder: ObservableObject {
     }
 
     private func removeTap() {
-        if let t = tap { CGEvent.tapEnable(tap: t, enable: false) }
+        if let t = tap { CGEvent.tapEnable(tap: t, enable: false); CFMachPortInvalidate(t) }
         if let s = tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes) }
         tap = nil
         tapSource = nil
     }
 
     fileprivate func reenableTap() {
+        guard state == .recording || state == .paused else { return }   // never restart after Stop
         if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
     }
 
