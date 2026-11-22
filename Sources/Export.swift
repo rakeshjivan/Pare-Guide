@@ -9,7 +9,8 @@ enum ExportFormat: String, CaseIterable, Identifiable {
     case docx = "Word (.docx)"
     case html = "Web page (.html)"
     case markdown = "Markdown"
-    case mp4 = "Video (.mp4)"
+    case tutorial = "Tutorial video (.mp4)"
+    case mp4 = "Simple slideshow video (.mp4)"
     case gif = "GIF"
     case bundle = "Pare Guide file (to share)"
     var id: String { rawValue }
@@ -19,7 +20,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         case .docx: return "docx"
         case .html: return "html"
         case .markdown: return "md"
-        case .mp4: return "mp4"
+        case .mp4, .tutorial: return "mp4"
         case .gif: return "gif"
         case .bundle: return "pareguide"
         }
@@ -55,6 +56,9 @@ enum Exporter {
         case .bundle:
             let folder = await MainActor.run { store.folder(guide.id) }
             try bundle(folder: folder, to: url)
+            return
+        case .tutorial:
+            try await TutorialVideo.make(guide: guide, to: url, progress: progress)
             return
         case .mp4:
             progress("Rendering steps…")

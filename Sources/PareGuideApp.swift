@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
+        PareVoice.stop()
         MainActor.assumeIsolated { Updater.shared.install(relaunch: false) }
     }
 
@@ -355,17 +356,15 @@ struct SettingsView: View {
                 Picker("New guides", selection: $defaultZoom) {
                     ForEach(Zoom.allCases) { Text($0.rawValue).tag($0.rawValue) }
                 }
-                Picker("Narration voice", selection: $voiceID) {
-                    Text("System default").tag("")
-                    ForEach(Speech.voices, id: \.identifier) { v in
-                        Text("\(v.name) (\(v.language))").tag(v.identifier)
-                    }
-                }
-                Text("Better voices: System Settings › Accessibility › Spoken Content › System Voice › Manage Voices.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
+
+            VoiceSettings()
+                .tabItem { Label("Voice", systemImage: "waveform") }
+
+            BrandSettings()
+                .tabItem { Label("Intros & Outros", systemImage: "rectangle.on.rectangle") }
 
             Form {
                 Picker("Write steps with", selection: $providerRaw) {
@@ -427,7 +426,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 520)
+        .frame(width: 680, height: 640)
     }
 
     private func loadKey() {

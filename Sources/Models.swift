@@ -33,6 +33,8 @@ struct Step: Codable, Identifiable, Equatable {
     var role = ""
     var label = ""
     var time = Date()
+    /// What the narrator says for this step in tutorial videos (nil = read the step text).
+    var narration: String?
 }
 
 enum Zoom: String, Codable, CaseIterable, Identifiable {
@@ -54,6 +56,11 @@ struct Guide: Codable, Identifiable, Equatable {
     var modified = Date()
     var zoom: Zoom = .some
     var steps: [Step] = []
+    /// Spoken over the intro and outro of tutorial videos.
+    var introNarration: String?
+    var outroNarration: String?
+    /// Which intro/outro style tutorial videos use (nil = the default from Settings).
+    var brandID: String?
 }
 
 struct GuideVersion: Identifiable {

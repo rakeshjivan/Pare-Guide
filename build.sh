@@ -50,6 +50,9 @@ if [ -f Resources/AppIcon.png ]; then
   iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 fi
 
+# Pare Voice helper (narration in cloned voices).
+cp Resources/pare_voice_engine.py "$APP/Contents/Resources/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -67,6 +70,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>NSMicrophoneUsageDescription</key><string>Pare Guide records a short sample of your voice when you add a voice for narration.</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

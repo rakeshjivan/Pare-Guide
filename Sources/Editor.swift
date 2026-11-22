@@ -15,10 +15,22 @@ struct GuideEditor: View {
     @State private var errorText: String?
     @State private var scanning = false
     @State private var aiTask: Task<Void, Never>?
+    @AppStorage("showNarration") private var showNarration = true
+    @ObservedObject private var brands = BrandStore.shared
 
     private var guide: Binding<Guide> {
         Binding(get: { store.guide(guideID) ?? Guide(title: "") },
                 set: { store.update($0) })
+    }
+
+    private func text(_ kp: WritableKeyPath<Guide, String?>) -> Binding<String> {
+        Binding(get: { guide.wrappedValue[keyPath: kp] ?? "" },
+                set: { v in var g = guide.wrappedValue; g[keyPath: kp] = v.isEmpty ? nil : v; guide.wrappedValue = g })
+    }
+
+    private var brandChoice: Binding<String> {
+        Binding(get: { guide.wrappedValue.brandID ?? "" },
+                set: { v in var g = guide.wrappedValue; g.brandID = v.isEmpty ? nil : v; guide.wrappedValue = g })
     }
 
     private func stepBinding(_ id: UUID) -> Binding<Step> {
@@ -36,6 +48,7 @@ struct GuideEditor: View {
             List {
                 ForEach(Array(guide.wrappedValue.steps.enumerated()), id: \.element.id) { i, step in
                     StepRow(guideID: guideID, step: stepBinding(step.id), number: i + 1, zoom: guide.wrappedValue.zoom,
+                            showNarration: showNarration,
                             onEditPicture: { editing = StepRef(id: step.id) },
                             onDelete: { delete(step.id) },
                             onAI: { writeWithAI(only: step.id) })
@@ -87,6 +100,27 @@ struct GuideEditor: View {
                 Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if showNarration {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Picker("Intro & outro", selection: brandChoice) {
+                            let def = brands.brand(nil)?.name ?? "None"
+                            Text("Default (\(def))").tag("")
+                            ForEach(brands.all) { Text($0.name).tag($0.id) }
+                            Text("None").tag(Brand.noneID)
+                        }
+                        .frame(maxWidth: 320)
+                        SettingsLink { Text("Edit…") }.controlSize(.small)
+                        Spacer()
+                        Label(Narrator.summary, systemImage: "waveform").font(.caption).foregroundStyle(.secondary)
+                    }
+                    NarrationField(label: "Intro", text: text(\.introNarration),
+                                   placeholder: "Spoken over the intro. Leave blank to read the title.")
+                    NarrationField(label: "Outro", text: text(\.outroNarration),
+                                   placeholder: "Spoken over the closing card (optional).")
+                }
+                .padding(.top, 4)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -115,11 +149,15 @@ struct GuideEditor: View {
             Menu {
                 Button("Write Every Step") { writeWithAI(only: nil) }
                 Button("Write Title and Summary") { writeTitle() }
+                Button("Write Narration Script") { writeNarration() }
                 Divider()
                 SettingsLink { Text("AI Settings…") }
             } label: { Label("Write with AI", systemImage: "sparkles") }
                 .disabled(busy != nil)
                 .help("Uses your Claude subscription, Apple Intelligence or an API key (Settings › AI)")
+
+            Toggle(isOn: $showNarration) { Label("Narration", systemImage: "waveform") }
+                .help("Show the narration lines used in tutorial videos")
 
             Button { AutoBlur.scan(guideID: guideID, force: true) } label: {
                 Label("Blur Private Details", systemImage: "eye.slash")
@@ -136,9 +174,11 @@ struct GuideEditor: View {
                 .help("Roll back to an earlier version of this guide")
 
             Menu {
-                ForEach(ExportFormat.allCases) { f in
+                Button("Tutorial Video (.mp4)") { export(.tutorial, narrate: true) }
+                Divider()
+                ForEach(ExportFormat.allCases.filter { $0 != .tutorial }) { f in
                     Button(f.rawValue) { export(f, narrate: false) }
-                    if f == .mp4 { Button("Video with narration (.mp4)") { export(.mp4, narrate: true) } }
+                    if f == .mp4 { Button("Simple slideshow with Mac narration (.mp4)") { export(.mp4, narrate: true) } }
                 }
             } label: { Label("Export", systemImage: "square.and.arrow.up") }
                 .disabled(busy != nil || guide.wrappedValue.steps.isEmpty)
@@ -211,6 +251,29 @@ struct GuideEditor: View {
         }
     }
 
+    private func writeNarration() {
+        guard AI.isReady else { errorText = AI.notReadyMessage; return }
+        busy = "Writing the narration script…"
+        errorText = nil
+        let g = guide.wrappedValue
+        store.update(g, forceSnapshot: true)
+        let brand = brands.brand(g.brandID)
+        aiTask = Task {
+            defer { busy = nil; aiTask = nil }
+            do {
+                let script = try await AI.narration(g, brand: brand)
+                var now = guide.wrappedValue
+                if !script.intro.isEmpty { now.introNarration = script.intro }
+                if !script.outro.isEmpty { now.outroNarration = script.outro }
+                for i in now.steps.indices { if let l = script.steps[now.steps[i].id] { now.steps[i].narration = l } }
+                store.update(now, forceSnapshot: true)
+                showNarration = true
+            } catch {
+                if !Task.isCancelled { errorText = error.localizedDescription }
+            }
+        }
+    }
+
     private func export(_ format: ExportFormat, narrate: Bool) {
         let g = guide.wrappedValue
         let panel = NSSavePanel()
@@ -247,6 +310,7 @@ struct StepRow: View {
     @Binding var step: Step
     let number: Int
     let zoom: Zoom
+    var showNarration = false
     let onEditPicture: () -> Void
     let onDelete: () -> Void
     let onAI: () -> Void
@@ -295,6 +359,12 @@ struct StepRow: View {
                             DispatchQueue.main.async { focused = true }
                         }
                         .help("Click to edit. Put **double asterisks** around words to make them bold.")
+                }
+                if showNarration {
+                    NarrationField(label: nil,
+                                   text: Binding(get: { step.narration ?? "" },
+                                                 set: { step.narration = $0.isEmpty ? nil : $0 }),
+                                   placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain)
                 }
                 if !step.appName.isEmpty {
                     Text([step.appName, step.windowTitle].filter { !$0.isEmpty }.joined(separator: " — "))
@@ -539,5 +609,27 @@ struct StepPictureEditor: View {
 
     private func clamp(_ p: CGPoint, _ size: CGSize) -> CGPoint {
         CGPoint(x: min(max(0, p.x), size.width), y: min(max(0, p.y), size.height))
+    }
+}
+
+
+/// One line of narration: what the narrator says. Blank uses the placeholder (the step text).
+struct NarrationField: View {
+    let label: String?
+    @Binding var text: String
+    let placeholder: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "waveform").foregroundStyle(Color(cgColor: Renderer.accent)).font(.caption)
+            if let label { Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 40, alignment: .leading) }
+            TextField(placeholder, text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+        .help("What the narrator says in tutorial videos. Leave blank to read the step text.")
     }
 }

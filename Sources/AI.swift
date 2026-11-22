@@ -588,3 +588,67 @@ enum AppleAI {
         throw PGError("Apple Intelligence needs macOS 26 or later.")
     }
 }
+
+// MARK: - Narration script for tutorial videos
+
+struct NarrationScript {
+    var intro: String
+    var steps: [UUID: String]
+    var outro: String
+}
+
+extension AI {
+    /// Turns the written steps into a natural spoken script: an intro, one line per step, and an outro.
+    static func narration(_ guide: Guide, brand: Brand?) async throws -> NarrationScript {
+        let steps = guide.steps
+        guard !steps.isEmpty else { return NarrationScript(intro: "", steps: [:], outro: "") }
+        let list = steps.enumerated().map { i, s -> String in
+            var line = "\(i + 1). \(s.text.plain)"
+            var facts: [String] = []
+            if !s.appName.isEmpty { facts.append("app: \(s.appName)") }
+            if !s.label.isEmpty { facts.append("clicked: \"\(s.label)\"") }
+            if !facts.isEmpty { line += "  [\(facts.joined(separator: "; "))]" }
+            return line
+        }.joined(separator: "\n")
+        let brandLine = brand.map { "The video is for \($0.name)\($0.tagline.isEmpty ? "" : " (tagline: \"\($0.tagline)\")")." } ?? ""
+        let prompt = """
+        You are writing the voiceover for a short tutorial video made from a recording on a Mac.
+        Title: \(guide.title.plain)
+        \(guide.summary.isEmpty ? "" : "Summary: \(guide.summary.plain)\n")\(brandLine)
+        Steps:
+        \(list)
+
+        Write natural, friendly narration in \(language) for a narrator to read aloud while each step is shown.
+        - intro: one sentence saying what the video shows (at most 20 words).
+        - steps: exactly \(steps.count) short spoken sentences, one per step, in order (at most 18 words each). \
+        Conversational, for example "Now click Compress PDF." No markdown, no asterisks, no step numbers. \
+        Never read out passwords or private details; say "enter your password" instead.
+        - outro: one short closing sentence (at most 16 words).
+        Reply with ONLY this JSON and nothing else: {"intro": "...", "steps": ["...", ...], "outro": "..."}
+        """
+        let reply: String
+        switch provider {
+        case .claudeCode:
+            if ClaudeCLI.find() != nil {
+                do { reply = try await ClaudeCLI.ask(prompt) }
+                catch {
+                    guard AppleAI.isAvailable else { throw error }
+                    reply = try await AppleAI.respond(prompt)
+                }
+            } else { reply = try await AppleAI.respond(prompt) }
+        case .apple: reply = try await AppleAI.respond(prompt)
+        case .anthropic, .openai: reply = try await send(prompt: prompt, image: nil, maxTokens: 2000)
+        }
+        guard let start = reply.firstIndex(of: "{"), let end = reply.lastIndex(of: "}"), start < end,
+              let data = String(reply[start...end]).data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw PGError("The AI's reply wasn't in the expected format. Try again.")
+        }
+        let lines = (obj["steps"] as? [String]) ?? []
+        var map: [UUID: String] = [:]
+        for (s, l) in zip(steps, lines) where !l.trimmed.isEmpty { map[s.id] = clean(l).plain }
+        return NarrationScript(intro: clean((obj["intro"] as? String) ?? "").plain,
+                               steps: map,
+                               outro: clean((obj["outro"] as? String) ?? "").plain)
+    }
+}
