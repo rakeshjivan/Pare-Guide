@@ -16,6 +16,9 @@ struct GuideEditor: View {
     @State private var scanning = false
     @State private var aiTask: Task<Void, Never>?
     @AppStorage("showNarration") private var showNarration = true
+    @AppStorage("editorGrid") private var grid = false
+    @State private var picked = Set<UUID>()
+    @State private var lastPicked: Int?
     @ObservedObject private var brands = BrandStore.shared
 
     private var guide: Binding<Guide> {
@@ -45,6 +48,79 @@ struct GuideEditor: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if grid { gridView } else { listView }
+            if busy != nil || errorText != nil || scanning { statusBar }
+        }
+        .toolbar { toolbar }
+        .sheet(item: $editing) { ref in
+            StepPictureEditor(guideID: guideID, step: stepBinding(ref.id))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .autoBlurChanged)) { _ in
+            scanning = AutoBlur.scanning.contains(guideID)
+        }
+        .onAppear { scanning = AutoBlur.scanning.contains(guideID) }
+        .onDisappear { aiTask?.cancel() }
+    }
+
+    // MARK: Grid: see every step at once and delete several together
+
+    private var gridView: some View {
+        let steps = guide.wrappedValue.steps
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(picked.isEmpty ? "Click steps to select them (Shift-click for a range)" : "\(picked.count) selected")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(picked.count == steps.count && !steps.isEmpty ? "Select None" : "Select All") {
+                    picked = picked.count == steps.count ? [] : Set(steps.map(\.id))
+                }
+                Button(role: .destructive) { deletePicked() } label: {
+                    Label(picked.count > 1 ? "Delete \(picked.count) Steps" : "Delete Step", systemImage: "trash")
+                }
+                .disabled(picked.isEmpty)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            Divider()
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 14) {
+                    ForEach(Array(steps.enumerated()), id: \.element.id) { i, step in
+                        StepTile(guideID: guideID, step: step, number: i + 1, zoom: guide.wrappedValue.zoom,
+                                 selected: picked.contains(step.id))
+                            .onTapGesture { pick(i, steps) }
+                            .contextMenu {
+                                Button("Delete Step", role: .destructive) { picked = [step.id]; deletePicked() }
+                            }
+                    }
+                }
+                .padding(16)
+            }
+            .onDeleteCommand { deletePicked() }
+        }
+        .onChange(of: steps.map(\.id)) { _, ids in picked.formIntersection(ids) }
+    }
+
+    private func pick(_ i: Int, _ steps: [Step]) {
+        let id = steps[i].id
+        if NSEvent.modifierFlags.contains(.shift), let a = lastPicked, a < steps.count {
+            for j in min(a, i)...max(a, i) { picked.insert(steps[j].id) }
+        } else if picked.contains(id) {
+            picked.remove(id)
+        } else {
+            picked.insert(id)
+        }
+        lastPicked = i
+    }
+
+    private func deletePicked() {
+        guard !picked.isEmpty else { return }
+        var g = guide.wrappedValue
+        g.steps.removeAll { picked.contains($0.id) }
+        store.update(g, forceSnapshot: true)   // Versions can bring them back
+        picked = []
+        lastPicked = nil
+    }
+
+    private var listView: some View {
             List {
                 ForEach(Array(guide.wrappedValue.steps.enumerated()), id: \.element.id) { i, step in
                     StepRow(guideID: guideID, step: stepBinding(step.id), number: i + 1, zoom: guide.wrappedValue.zoom,
@@ -69,17 +145,6 @@ struct GuideEditor: View {
                     .padding(.vertical, 8)
             }
             .listStyle(.inset)
-            if busy != nil || errorText != nil || scanning { statusBar }
-        }
-        .toolbar { toolbar }
-        .sheet(item: $editing) { ref in
-            StepPictureEditor(guideID: guideID, step: stepBinding(ref.id))
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .autoBlurChanged)) { _ in
-            scanning = AutoBlur.scanning.contains(guideID)
-        }
-        .onAppear { scanning = AutoBlur.scanning.contains(guideID) }
-        .onDisappear { aiTask?.cancel() }
     }
 
     private var header: some View {
@@ -145,6 +210,14 @@ struct GuideEditor: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItem {
+            Picker("Layout", selection: $grid) {
+                Label("List", systemImage: "list.bullet").tag(false)
+                Label("Grid", systemImage: "square.grid.2x2").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .help("List to edit steps; Grid to see them all and delete several at once")
+        }
         ToolbarItemGroup {
             Menu {
                 Button("Write Every Step") { writeWithAI(only: nil) }
@@ -631,5 +704,52 @@ struct NarrationField: View {
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
         .help("What the narrator says in tutorial videos. Leave blank to read the step text.")
+    }
+}
+
+
+/// One step as a thumbnail in the grid.
+struct StepTile: View {
+    let guideID: UUID
+    let step: Step
+    let number: Int
+    let zoom: Zoom
+    let selected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .topLeading) {
+                if step.image != nil {
+                    StepPicture(guideID: guideID, step: step, zoom: zoom, maxWidth: 520)
+                        .aspectRatio(16 / 10, contentMode: .fit)
+                } else {
+                    RoundedRectangle(cornerRadius: 6).fill(.quaternary).aspectRatio(16 / 10, contentMode: .fit)
+                        .overlay(Image(systemName: "text.alignleft").foregroundStyle(.secondary))
+                }
+                Text("\(number)")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color(cgColor: Renderer.accent)))
+                    .padding(6)
+            }
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(selected ? Color.accentColor : Color.white)
+                    .shadow(radius: 2)
+                    .padding(6)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            Text(step.text.plain.isEmpty ? "(no text)" : step.text.plain)
+                .font(.callout).lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if !step.appName.isEmpty {
+                Text(step.appName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2))
+        .contentShape(Rectangle())
     }
 }

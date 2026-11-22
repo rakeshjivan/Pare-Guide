@@ -23,7 +23,16 @@ final class Recorder: ObservableObject {
     /// Called with the new guide's id when a recording ends.
     var onFinish: ((UUID) -> Void)?
 
-    private var guide: Guide?
+    /// The guide being recorded. Always read fresh from the store and written straight back, so edits
+    /// made while a recording is finishing (deleted steps, changed text) are never overwritten.
+    private var guideID: UUID?
+    private var guide: Guide? {
+        get { guideID.flatMap { GuideStore.shared.guide($0) } }
+        set {
+            guideID = newValue?.id
+            if let g = newValue, GuideStore.shared.guide(g.id) != nil { GuideStore.shared.update(g) }
+        }
+    }
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private let grabber = FrameGrabber()
