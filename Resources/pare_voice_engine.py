@@ -109,14 +109,23 @@ def best_speech_window(a, sr, length=14.0):
     return a[s * f: e * f]
 
 
+TOOLS = os.path.expanduser("~/pare-voice-tools")   # separate environment so it can't upset Chatterbox
+SEPARATOR = os.path.join(TOOLS, "bin", "audio-separator")
+
+
 def remove_music(path, workdir):
-    """Keeps only the voice (needs the optional audio-separator package)."""
-    from audio_separator.separator import Separator
-    sep = Separator(output_dir=workdir, model_file_dir=os.path.expanduser("~/chatterbox/separator-models"),
-                    output_single_stem="Vocals")
-    sep.load_model(model_filename="Kim_Vocal_2.onnx")
-    out = sep.separate(path)
-    return os.path.join(workdir, out[0]) if out else path
+    """Keeps only the voice, using the music remover installed by Pare Guide's setup."""
+    import subprocess
+    if not os.path.exists(SEPARATOR):
+        raise RuntimeError("The music remover isn't installed. Click Repair or Update in Settings › Voice.")
+    env = dict(os.environ, PATH=os.path.join(TOOLS, "bin") + ":/usr/bin:/bin")
+    r = subprocess.run([SEPARATOR, path, "--model_filename", "Kim_Vocal_2.onnx", "--output_format", "WAV",
+                        "--single_stem", "Vocals", "--model_file_dir", os.path.join(TOOLS, "models"),
+                        "--output_dir", workdir], capture_output=True, text=True, env=env, timeout=1800)
+    outs = [f for f in os.listdir(workdir) if f.lower().endswith(".wav") and "vocals" in f.lower()]
+    if r.returncode != 0 or not outs:
+        raise RuntimeError("Removing the music didn't work: " + (r.stderr or r.stdout)[-300:])
+    return os.path.join(workdir, outs[0])
 
 
 def add_voice(src, name, clean):
@@ -170,12 +179,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.reply(200, {"ok": True, "loaded": ENGINE.kind})
         elif self.path == "/capabilities":
-            try:
-                import audio_separator  # noqa: F401
-                clean = True
-            except Exception:
-                clean = False
-            self.reply(200, {"removeMusic": clean})
+            self.reply(200, {"removeMusic": os.path.exists(SEPARATOR)})
         elif self.path == "/voices":
             self.reply(200, {"voices": list_voices()})
         else:

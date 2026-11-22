@@ -30,11 +30,16 @@ final class VoiceSetup: ObservableObject {
     echo "STEP Making the voice environment…"
     if [ ! -x "$VENV/bin/python" ]; then "$UV" venv --python 3.11 "$VENV"; fi
     echo "STEP Installing Chatterbox (a few minutes)…"
-    "$UV" pip install --python "$VENV/bin/python" --upgrade chatterbox-tts "setuptools<81" librosa soundfile
+    "$UV" pip install --python "$VENV/bin/python" chatterbox-tts "setuptools<81"
     echo "STEP Installing the music remover…"
-    "$UV" pip install --python "$VENV/bin/python" "audio-separator[cpu]" imageio-ffmpeg || echo "Music remover skipped"
-    FF="$("$VENV/bin/python" -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null || true)"
-    if [ -n "$FF" ] && [ ! -e "$VENV/bin/ffmpeg" ]; then ln -sf "$FF" "$VENV/bin/ffmpeg"; fi
+    TOOLS="$HOME/pare-voice-tools"
+    if [ ! -x "$TOOLS/bin/python" ]; then "$UV" venv --python 3.11 "$TOOLS"; fi
+    if "$UV" pip install --python "$TOOLS/bin/python" "audio-separator[cpu]" imageio-ffmpeg; then
+      FF="$("$TOOLS/bin/python" -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())' 2>/dev/null || true)"
+      if [ -n "$FF" ]; then ln -sf "$FF" "$TOOLS/bin/ffmpeg"; fi
+    else
+      echo "Music remover skipped (everything else still works)"
+    fi
     echo "STEP Downloading the voice models (a few GB, once only)…"
     "$VENV/bin/python" - <<'PY'
     import torch

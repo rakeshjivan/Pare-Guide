@@ -51,6 +51,23 @@ Click **Write with AI** to reword every step, or the ✨ button for one step. **
 - **Apple Intelligence.** Free, on-device and offline (macOS 26 or later). It uses the recorded button names, app and window, not the screenshots. It also takes over automatically if Claude Code isn't available or your allowance runs out.
 - **Anthropic or OpenAI API key**, if you have API credits. The key is kept in your Mac's Keychain.
 
+## Tutorial videos
+
+**Export › Tutorial Video** turns a guide into a narrated how-to video (1080p). The camera eases in on each click, a cursor glides to it and clicks (with a click sound), and each step appears as a caption. The video opens and closes with an intro and outro.
+
+- **Narration.** Click **Narration** in the toolbar to see what the narrator says for each step, plus an intro and outro line. Type your own, or use **Write with AI › Write Narration Script** to turn the steps into a natural spoken script. A blank line reads the step text.
+- **Voices.** Choose the narrator in **Settings › Voice**: a cloned voice with **Pare Voice**, or one of the Mac's built-in voices.
+- **Intros & outros.** The **Pare PDF** style is built in. Add your own in **Settings › Intros & Outros**: colours, a logo, a tagline and website, or your own intro and outro video clips. Pick one per guide, or **None**.
+
+### Pare Voice (cloned voices)
+
+Pare Voice narrates in cloned voices using Chatterbox, entirely on your Mac.
+
+- **Setup.** In **Settings › Voice**, click **Set Up Pare Voice**. Pare Guide downloads and installs everything by itself: a Python environment at `~/chatterbox`, Chatterbox, a music remover (in `~/pare-voice-tools`) and the voice models. It takes 10–20 minutes and a few GB the first time. **Repair or Update** runs it again.
+- **Voice library.** **Record a Voice** shows a short script to read for about 15 seconds. **Add from File** takes any audio or video, picks the cleanest stretch of speech and can remove background music. Voices are kept in `~/Documents/Pare Voice/Voices` (shared with the Pare Voice app). **Export Voices** and **Import Voices** move the whole library to another Mac in one file.
+- **Fast or Expressive.** **Fast (Turbo)** is several times quicker and understands tags like `[laugh]`. **Expressive (Standard)** is slower and has sliders for expressiveness and pace.
+- Only clone voices you have permission to use. Every clip Chatterbox makes carries an inaudible watermark showing it was AI-generated.
+
 ## Export
 
 | Format | Notes |
@@ -59,8 +76,8 @@ Click **Write with AI** to reword every step, or the ✨ button for one step. **
 | Word (.docx) | Opens in Word or Pages; edit freely |
 | Web page (.html) | One file, pictures included, light and dark mode |
 | Markdown | A folder with the `.md` file and an `images` folder |
-| Video (.mp4) | 1080p, one step every few seconds with a caption |
-| Video with narration | Read aloud by your Mac's built-in voice (choose it in Settings) |
+| Tutorial video (.mp4) | Narrated, animated how-to video with intro and outro (see above) |
+| Simple slideshow (.mp4) | 1080p, one step every few seconds with a caption, optionally read by a Mac voice |
 | GIF | Loops through the steps |
 | Pare Guide file | Share a `.pareguide` file. Others open it with **Import** or a double-click. |
 
