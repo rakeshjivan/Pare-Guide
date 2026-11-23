@@ -227,7 +227,7 @@ struct GuideEditor: View {
                         .frame(maxWidth: 320)
                         SettingsLink { Text("Edit…") }.controlSize(.small)
                         Spacer()
-                        Label(Narrator.summary, systemImage: "waveform").font(.caption).foregroundStyle(.secondary)
+                        VoiceQuickPicker()
                     }
                     if layout != 2 {
                         NarrationField(label: "Intro", text: text(\.introNarration),
@@ -1032,5 +1032,121 @@ struct StepTile: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.06)))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2))
         .contentShape(Rectangle())
+    }
+}
+
+
+// MARK: - Choose the voice without opening Settings
+
+/// The voice button in the guide header: voice, Fast or Expressive, and the sliders, in a popover.
+struct VoiceQuickPicker: View {
+    @AppStorage("narratorKind") private var kindRaw = ""
+    @AppStorage("pareVoiceName") private var voiceName = ""
+    @AppStorage("pareVoiceMode") private var modeRaw = PareVoiceMode.turbo.rawValue
+    @AppStorage("pareVoiceExpressiveness") private var expressiveness = 0.45
+    @AppStorage("pareVoicePace") private var pace = 0.5
+    @AppStorage("voiceID") private var macVoiceID = ""
+    @ObservedObject private var player = NarrationPlayer.shared
+    @State private var open = false
+    @State private var voices: [String] = []
+    @State private var problem: String?
+
+    private var kind: NarratorKind {
+        NarratorKind(rawValue: kindRaw) ?? (PareVoice.isInstalled ? .pareVoice : .mac)
+    }
+    private var standard: Bool { modeRaw == PareVoiceMode.standard.rawValue }
+    private var title: String {
+        guard kind == .pareVoice else { return "Mac voice" }
+        let v = voiceName.isEmpty ? (PareVoice.selectedVoice ?? "Choose a voice") : voiceName
+        return "\(v) · \(standard ? "Expressive" : "Fast")"
+    }
+    private let sample = "Here's how this voice sounds in your tutorial."
+
+    var body: some View {
+        Button { voices = PareVoice.voices; open.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "waveform")
+                Text(title)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help("Change the narrator's voice")
+        .popover(isPresented: $open, arrowEdge: .bottom) { panel.onDisappear { player.stop() } }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Narrator voice").font(.headline)
+            Picker("Narrator", selection: Binding(get: { kind.rawValue }, set: { kindRaw = $0 })) {
+                ForEach(NarratorKind.allCases) { Text($0.rawValue).tag($0.rawValue) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if kind == .pareVoice {
+                if !PareVoice.isInstalled {
+                    Text("Pare Voice isn't set up on this Mac yet.").foregroundStyle(.secondary)
+                } else {
+                    Picker("Voice", selection: Binding(get: { voiceName.isEmpty ? (PareVoice.selectedVoice ?? "") : voiceName },
+                                                       set: { voiceName = $0 })) {
+                        ForEach(voices, id: \.self) { Text($0).tag($0) }
+                    }
+                    .disabled(voices.isEmpty)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Mode", selection: $modeRaw) {
+                            Text("Fast").tag(PareVoiceMode.turbo.rawValue)
+                            Text("Expressive (slower)").tag(PareVoiceMode.standard.rawValue)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(standard ? "Richer delivery, but several times slower to make."
+                                      : "Quickest to make. Good for drafts and most videos.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+
+                    if standard {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack { Text("Expressiveness"); Spacer(); Text("calm ← → lively").font(.caption).foregroundStyle(.secondary) }
+                            Slider(value: $expressiveness, in: 0.25...1.0)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack { Text("Pace"); Spacer(); Text("slower ← → quicker").font(.caption).foregroundStyle(.secondary) }
+                            Slider(value: $pace, in: 0.0...0.8)
+                        }
+                        Button("Reset sliders") { expressiveness = 0.45; pace = 0.5 }
+                            .buttonStyle(.link).font(.caption)
+                    }
+                }
+            } else {
+                Picker("Mac voice", selection: $macVoiceID) {
+                    Text("System default").tag("")
+                    ForEach(Speech.voices, id: \.identifier) { v in Text("\(v.name) (\(v.language))").tag(v.identifier) }
+                }
+            }
+
+            Divider()
+            HStack {
+                let busy = player.preparing == sample, on = player.playing == sample
+                Button {
+                    problem = nil
+                    Task {
+                        do { try await player.toggle(sample) }
+                        catch { problem = error.localizedDescription }
+                    }
+                } label: {
+                    Label(busy ? "Preparing…" : on ? "Stop" : "Play a Sample",
+                          systemImage: busy ? "hourglass" : on ? "stop.fill" : "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                Spacer()
+                SettingsLink { Text("More voice settings…") }.buttonStyle(.link)
+            }
+            if let problem { Text(problem).font(.caption).foregroundStyle(.red) }
+        }
+        .padding(18)
+        .frame(width: 360)
     }
 }
