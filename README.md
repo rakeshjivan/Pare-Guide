@@ -38,6 +38,8 @@ What becomes a step:
 - Click a picture to **Blur** private details, **Crop**, or move the **Highlight** box.
 - **Pictures:** show the whole screen, or zoom in automatically around each click.
 - **Versions** rolls the guide back to an earlier save.
+- **Drawings.** In the picture editor, use **Arrow**, **Box**, **Circle**, **Text** and **Number** to mark up a screenshot. Click a drawing to select it, then change its colour or size (S, M or L), edit its words, or delete it. Drawings appear in every export and in videos.
+- **Translate.** **Write with AI › Translate Guide…** makes a copy of the guide in another language: title, steps, narration and text labels. On-screen labels (the bold words) stay as the screenshots show them, unless you turn that off.
 
 ### Private details
 
@@ -79,6 +81,7 @@ Pare Voice narrates in cloned voices using Chatterbox, entirely on your Mac.
 | PDF | A4, numbered steps with pictures |
 | Word (.docx) | Opens in Word or Pages; edit freely |
 | Web page (.html) | One file, pictures included, light and dark mode |
+| Interactive demo (.html) | One offline file: viewers click the pulsing highlight to move through the steps, or use Next and the arrow keys. Works in any browser and can go on a website. |
 | Markdown | A folder with the `.md` file and an `images` folder |
 | Tutorial video (.mp4) | Narrated, animated how-to video with intro and outro (see above) |
 | Simple slideshow (.mp4) | 1080p, one step every few seconds with a caption, optionally read by a Mac voice |
