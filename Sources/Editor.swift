@@ -856,7 +856,7 @@ struct StepPictureEditor: View {
         var help: String {
             switch self {
             case .blur: return "Drag over anything private. Click a blur box to remove it."
-            case .crop: return "Drag to choose the part of the screen to show."
+            case .crop: return "Drag the handles to crop, or drag inside the box to move it."
             case .highlight: return "Drag a box around the thing to click."
             case .arrow: return "Drag from where the arrow starts to where it points."
             case .box: return "Drag to draw a box."
@@ -875,6 +875,10 @@ struct StepPictureEditor: View {
     @State private var dragNow: CGPoint?
     @State private var detecting = false
     @State private var selectedMark: UUID?
+    /// What the current crop drag is doing: moving a handle (0–7), moving the whole box, or drawing a new one.
+    private enum CropAction { case handle(Int), move, new }
+    @State private var cropAction: CropAction?
+    @State private var cropAtStart = CGRect.zero
     @AppStorage("annotationColour") private var markColourRaw = Annotation.Colour.red.rawValue
     @AppStorage("annotationSize") private var markSize = 1.0
     @FocusState private var labelFocused: Bool
@@ -906,16 +910,39 @@ struct StepPictureEditor: View {
                     } else {
                         Rectangle().fill(.quaternary).frame(width: fit.width, height: fit.height).overlay(ProgressView())
                     }
-                    // Crop: dim everything outside.
-                    if let c = draft.crop {
-                        let r = view(c, s)
-                        Path { p in
-                            p.addRect(CGRect(origin: .zero, size: fit))
-                            p.addRect(r)
+                    // Crop: dim everything outside, with handles to drag while the Crop tool is on.
+                    if draft.crop != nil || tool == .crop {
+                        let r = view(draft.crop ?? CGRect(origin: .zero, size: pixelSize), s)
+                        if draft.crop != nil {
+                            Path { p in
+                                p.addRect(CGRect(origin: .zero, size: fit))
+                                p.addRect(r)
+                            }
+                            .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
                         }
-                        .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
                         Rectangle().strokeBorder(Color.white, lineWidth: 2)
                             .frame(width: r.width, height: r.height).offset(x: r.minX, y: r.minY)
+                            .shadow(color: .black.opacity(0.4), radius: 1)
+                        if tool == .crop {
+                            // Rule-of-thirds guides
+                            Path { p in
+                                for k in 1...2 {
+                                    let x = r.minX + r.width * CGFloat(k) / 3, y = r.minY + r.height * CGFloat(k) / 3
+                                    p.move(to: CGPoint(x: x, y: r.minY)); p.addLine(to: CGPoint(x: x, y: r.maxY))
+                                    p.move(to: CGPoint(x: r.minX, y: y)); p.addLine(to: CGPoint(x: r.maxX, y: y))
+                                }
+                            }
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                            ForEach(0..<8, id: \.self) { h in
+                                let pt = Self.handlePoint(h, in: r)
+                                let corner = h % 2 == 0
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color.white)
+                                    .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Color.black.opacity(0.6), lineWidth: 1))
+                                    .frame(width: corner ? 14 : (h == 1 || h == 5 ? 26 : 8), height: corner ? 14 : (h == 1 || h == 5 ? 8 : 26))
+                                    .position(pt)
+                            }
+                        }
                     }
                     ForEach(Array(draft.blurs.enumerated()), id: \.offset) { _, b in
                         let r = view(b, s)
@@ -941,10 +968,12 @@ struct StepPictureEditor: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { v in
+                            if tool == .crop { cropDrag(v, fit: fit, scale: s); return }
                             dragStart = clamp(v.startLocation, fit)
                             dragNow = clamp(v.location, fit)
                         }
                         .onEnded { v in
+                            if tool == .crop { cropDrag(v, fit: fit, scale: s); cropAction = nil; return }
                             let a = clamp(v.startLocation, fit), b = clamp(v.location, fit)
                             dragStart = nil
                             dragNow = nil
@@ -1059,6 +1088,61 @@ struct StepPictureEditor: View {
             draft.showHighlight = true
         default: break
         }
+    }
+
+    // MARK: Crop handles
+
+    /// Handles go clockwise from the top-left corner: 0 TL, 1 top, 2 TR, 3 right, 4 BR, 5 bottom, 6 BL, 7 left.
+    static func handlePoint(_ h: Int, in r: CGRect) -> CGPoint {
+        switch h {
+        case 0: return CGPoint(x: r.minX, y: r.minY)
+        case 1: return CGPoint(x: r.midX, y: r.minY)
+        case 2: return CGPoint(x: r.maxX, y: r.minY)
+        case 3: return CGPoint(x: r.maxX, y: r.midY)
+        case 4: return CGPoint(x: r.maxX, y: r.maxY)
+        case 5: return CGPoint(x: r.midX, y: r.maxY)
+        case 6: return CGPoint(x: r.minX, y: r.maxY)
+        default: return CGPoint(x: r.minX, y: r.midY)
+        }
+    }
+
+    private func cropDrag(_ v: DragGesture.Value, fit: CGSize, scale s: CGFloat) {
+        let full = CGRect(origin: .zero, size: pixelSize)
+        let current = draft.crop ?? full
+        let viewRect = view(current, s)
+        if cropAction == nil {
+            cropAtStart = current
+            let p = v.startLocation
+            if let h = (0..<8).first(where: { hypot(Self.handlePoint($0, in: viewRect).x - p.x, Self.handlePoint($0, in: viewRect).y - p.y) < 14 }) {
+                cropAction = .handle(h)
+            } else if viewRect.insetBy(dx: 4, dy: 4).contains(p), draft.crop != nil {
+                cropAction = .move
+            } else {
+                cropAction = .new
+            }
+        }
+        let dx = (v.location.x - v.startLocation.x) * s, dy = (v.location.y - v.startLocation.y) * s
+        let minSide: CGFloat = 60
+        var r = cropAtStart
+        switch cropAction {
+        case .handle(let h):
+            var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
+            if [0, 6, 7].contains(h) { minX = min(max(0, minX + dx), maxX - minSide) }
+            if [2, 3, 4].contains(h) { maxX = max(min(full.maxX, maxX + dx), minX + minSide) }
+            if [0, 1, 2].contains(h) { minY = min(max(0, minY + dy), maxY - minSide) }
+            if [4, 5, 6].contains(h) { maxY = max(min(full.maxY, maxY + dy), minY + minSide) }
+            r = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        case .move:
+            r.origin.x = min(max(0, r.minX + dx), full.width - r.width)
+            r.origin.y = min(max(0, r.minY + dy), full.height - r.height)
+        case .new, .none:
+            let a = clamp(v.startLocation, fit), b = clamp(v.location, fit)
+            let vr = rect(a, b)
+            guard vr.width * s >= minSide, vr.height * s >= minSide else { return }
+            r = CGRect(x: vr.minX * s, y: vr.minY * s, width: vr.width * s, height: vr.height * s)
+        }
+        // Covering the whole picture means no crop.
+        draft.crop = r.insetBy(dx: -2, dy: -2).contains(full) ? nil : r
     }
 
     // MARK: Drawing options
