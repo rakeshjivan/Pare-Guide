@@ -292,7 +292,7 @@ enum TutorialVideo {
                 adaptor.append(pb, withPresentationTime: CMTime(value: frameIndex, timescale: fps))
                 frameIndex += 1
                 if frameIndex % 60 == 0 {
-                    progress("Drawing the video… \(Int(Double(frameIndex) / Double(max(1, totalFrames)) * 100))%")
+                    progress("Building the video… \(Int(Double(frameIndex) / Double(max(1, totalFrames)) * 100))%")
                 }
             }
         }

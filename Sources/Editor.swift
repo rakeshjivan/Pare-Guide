@@ -11,6 +11,7 @@ struct GuideEditor: View {
     let guideID: UUID
     @ObservedObject private var store = GuideStore.shared
     @State private var editing: StepRef?
+    @State private var translating = false
     @State private var busy: String?
     @State private var errorText: String?
     @State private var scanning = false
@@ -87,6 +88,9 @@ struct GuideEditor: View {
         .toolbar { toolbar }
         .sheet(item: $editing) { ref in
             StepPictureEditor(guideID: guideID, step: stepBinding(ref.id))
+        }
+        .sheet(isPresented: $translating) {
+            TranslateSheet(guide: guide.wrappedValue)
         }
         .onReceive(NotificationCenter.default.publisher(for: .autoBlurChanged)) { _ in
             scanning = AutoBlur.scanning.contains(guideID)
@@ -302,6 +306,9 @@ struct GuideEditor: View {
                 Button("Write Narration Script") { writeNarration() }
                 Button("Polish My Spoken Narration") { polishSpoken() }
                     .help("Tidies what you said while recording into clean voiceover lines")
+                Divider()
+                Button("Translate Guide…") { translating = true }
+                    .help("Make a copy of this guide in another language")
                 Divider()
                 SettingsLink { Text("AI Settings…") }
             } label: { Label("Write with AI", systemImage: "sparkles") }
@@ -783,7 +790,7 @@ struct StepPicture: View {
     }
 
     private static func key(_ g: UUID, _ step: Step, _ zoom: Zoom, _ w: Int) -> String {
-        "\(g)|\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)|\(step.zoomOverride?.rawValue ?? "-")|\(w)"
+        "\(g)|\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)|\(step.zoomOverride?.rawValue ?? "-")|\(step.annotations ?? [])|\(w)"
     }
     private var key: String { Self.key(guideID, step, zoom, maxWidth) }
 
@@ -822,12 +829,40 @@ struct StepPictureEditor: View {
 
     enum Tool: String, CaseIterable, Identifiable {
         case blur = "Blur", crop = "Crop", highlight = "Highlight"
+        case arrow = "Arrow", box = "Box", circle = "Circle", text = "Text", number = "Number"
         var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .blur: return "eye.slash"
+            case .crop: return "crop"
+            case .highlight: return "cursorarrow.rays"
+            case .arrow: return "arrow.up.right"
+            case .box: return "rectangle"
+            case .circle: return "circle"
+            case .text: return "textformat"
+            case .number: return "1.circle"
+            }
+        }
+        var kind: Annotation.Kind? {
+            switch self {
+            case .arrow: return .arrow
+            case .box: return .box
+            case .circle: return .circle
+            case .text: return .text
+            case .number: return .number
+            default: return nil
+            }
+        }
         var help: String {
             switch self {
             case .blur: return "Drag over anything private. Click a blur box to remove it."
             case .crop: return "Drag to choose the part of the screen to show."
             case .highlight: return "Drag a box around the thing to click."
+            case .arrow: return "Drag from where the arrow starts to where it points."
+            case .box: return "Drag to draw a box."
+            case .circle: return "Drag to draw a circle."
+            case .text: return "Click where the label goes, then type its words below."
+            case .number: return "Click to drop numbered markers: 1, 2, 3…"
             }
         }
     }
@@ -839,20 +874,28 @@ struct StepPictureEditor: View {
     @State private var dragStart: CGPoint?
     @State private var dragNow: CGPoint?
     @State private var detecting = false
+    @State private var selectedMark: UUID?
+    @AppStorage("annotationColour") private var markColourRaw = Annotation.Colour.red.rawValue
+    @AppStorage("annotationSize") private var markSize = 1.0
+    @FocusState private var labelFocused: Bool
+
+    private var markColour: Annotation.Colour { Annotation.Colour(rawValue: markColourRaw) ?? .red }
+    private var selectedIndex: Int? { selectedMark.flatMap { id in draft.marks.firstIndex { $0.id == id } } }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 14) {
                 Picker("Tool", selection: $tool) {
-                    ForEach(Tool.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(Tool.allCases) { t in Label(t.rawValue, systemImage: t.icon).tag(t) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 280)
-                Text(tool.help).font(.callout).foregroundStyle(.secondary)
+                .fixedSize()
+                Text(tool.help).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 Spacer()
             }
-            .padding(12)
+            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 6)
+            if tool.kind != nil || selectedIndex != nil { markBar }
 
             GeometryReader { geo in
                 let fit = fitted(pixelSize, in: geo.size)
@@ -879,7 +922,13 @@ struct StepPictureEditor: View {
                         Rectangle().strokeBorder(Color.blue, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
                             .frame(width: r.width, height: r.height).offset(x: r.minX, y: r.minY)
                     }
-                    if let a = dragStart, let b = dragNow {
+                    AnnotationOverlay(marks: draft.marks, pixelsPerPoint: s, unit: CGFloat(draft.scale), selected: selectedMark)
+                        .frame(width: fit.width, height: fit.height)
+                        .allowsHitTesting(false)
+                    if let a = dragStart, let b = dragNow, tool == .arrow {
+                        Path { p in p.move(to: a); p.addLine(to: b) }
+                            .stroke(Color(cgColor: markColour.cg), style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [6, 3]))
+                    } else if let a = dragStart, let b = dragNow, tool.kind != .text, tool.kind != .number {
                         let r = rect(a, b)
                         Rectangle().strokeBorder(tool == .blur ? Color.blue : tool == .crop ? Color.white : Color(cgColor: Renderer.accent),
                                                  style: StrokeStyle(lineWidth: 2, dash: [6, 3]))
@@ -924,7 +973,7 @@ struct StepPictureEditor: View {
             }
             .padding(12)
         }
-        .frame(minWidth: 980, idealWidth: 1200, minHeight: 680, idealHeight: 820)
+        .frame(minWidth: 1100, idealWidth: 1240, minHeight: 700, idealHeight: 840)
         .onAppear { draft = step }
         .task(id: previewKey) { await renderPreview() }
     }
@@ -937,6 +986,7 @@ struct StepPictureEditor: View {
         var s = draft
         s.crop = nil
         s.zoomOverride = nil
+        s.annotations = nil   // drawn live on top while editing
         let st = s
         let result = await Task.detached(priority: .userInitiated) { () -> (CGImage, CGSize)? in
             guard let base = GuideStore.loadImage(url),
@@ -966,6 +1016,31 @@ struct StepPictureEditor: View {
         let r = rect(a, b)
         let px = CGRect(x: r.minX * s, y: r.minY * s, width: r.width * s, height: r.height * s)
         let isClick = r.width < 4 && r.height < 4
+        if let kind = tool.kind {
+            let pa = CGPoint(x: a.x * s, y: a.y * s), pb = CGPoint(x: b.x * s, y: b.y * s)
+            let u = CGFloat(draft.scale)
+            // Clicking on a drawing selects it.
+            if isClick, let hit = draft.marks.last(where: { Renderer.bounds($0, unit: u).contains(pa) }) {
+                selectedMark = hit.id
+                return
+            }
+            var m = Annotation(kind: kind, a: pa, b: pb, colour: markColour, size: markSize)
+            switch kind {
+            case .arrow, .box, .circle:
+                guard !isClick else { selectedMark = nil; return }
+            case .text:
+                m.b = pa
+                m.text = "Label"
+            case .number:
+                m.b = pa
+                let used = draft.marks.filter { $0.kind == .number }.compactMap { Int($0.text) }
+                m.text = "\((used.max() ?? 0) + 1)"
+            }
+            draft.marks.append(m)
+            selectedMark = m.id
+            if kind == .text { DispatchQueue.main.async { labelFocused = true } }
+            return
+        }
         switch tool {
         case .blur:
             if isClick {
@@ -982,7 +1057,58 @@ struct StepPictureEditor: View {
                 draft.clickPoint = CGPoint(x: px.midX, y: px.midY)
             }
             draft.showHighlight = true
+        default: break
         }
+    }
+
+    // MARK: Drawing options
+
+    private var markBar: some View {
+        HStack(spacing: 12) {
+            Text(selectedIndex != nil ? "Selected:" : "New drawings:").font(.callout).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                ForEach(Annotation.Colour.allCases) { c in
+                    Button {
+                        markColourRaw = c.rawValue
+                        if let i = selectedIndex { draft.marks[i].colour = c }
+                    } label: {
+                        Circle().fill(Color(cgColor: c.cg))
+                            .frame(width: 18, height: 18)
+                            .overlay(Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1))
+                            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 2.5).padding(-4)
+                                .opacity((selectedIndex.map { draft.marks[$0].colour } ?? markColour) == c ? 1 : 0))
+                    }
+                    .buttonStyle(.plain)
+                    .help(c.rawValue.capitalized)
+                }
+            }
+            Picker("Size", selection: Binding(get: { selectedIndex.map { draft.marks[$0].size } ?? markSize },
+                                             set: { v in markSize = v; if let i = selectedIndex { draft.marks[i].size = v } })) {
+                Text("S").tag(0.7)
+                Text("M").tag(1.0)
+                Text("L").tag(1.5)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            if let i = selectedIndex, draft.marks[i].kind == .text || draft.marks[i].kind == .number {
+                TextField(draft.marks[i].kind == .text ? "Label text" : "Number", text: $draft.marks[i].text)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: draft.marks[i].kind == .text ? 260 : 60)
+                    .focused($labelFocused)
+            }
+            if let i = selectedIndex {
+                Button(role: .destructive) {
+                    draft.marks.remove(at: i)
+                    selectedMark = nil
+                } label: { Label("Delete", systemImage: "trash") }
+                Button("Deselect") { selectedMark = nil }
+            }
+            Spacer()
+            if !draft.marks.isEmpty {
+                Button("Remove all drawings") { draft.marks = []; selectedMark = nil }
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 8)
     }
 
     private func fitted(_ size: CGSize, in box: CGSize) -> CGSize {
@@ -1165,6 +1291,138 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
+
+/// Makes a translated copy of a guide.
+struct TranslateSheet: View {
+    let guide: Guide
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("translateLanguage") private var language = "Chinese (Simplified)"
+    @State private var other = ""
+    @State private var keepLabels = true
+    @State private var working: String?
+    @State private var problem: String?
+    @State private var task: Task<Void, Never>?
+
+    private var target: String { language == "Other" ? other.trimmed : language }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Translate “\(guide.title.plain)”").font(.title3.weight(.semibold))
+            Text("Makes a copy of this guide in another language: the title, steps, narration script and text labels. Screenshots, blurs and drawings stay the same. The original isn't changed.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Picker("Language", selection: $language) {
+                ForEach(AI.translationLanguages, id: \.self) { Text($0).tag($0) }
+                Divider()
+                Text("Other…").tag("Other")
+            }
+            if language == "Other" {
+                TextField("Language, for example Tamil or Brazilian Portuguese", text: $other)
+            }
+            Toggle("Keep on-screen labels (the bold words) as they appear in the screenshots", isOn: $keepLabels)
+                .help("Turn off if the app in the screenshots is also in the new language")
+            Text("For a narrated video, choose a voice that speaks this language in Settings › Voice.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let w = working { HStack { ProgressView().controlSize(.small); Text(w).font(.callout) } }
+            if let p = problem { Text(p).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { task?.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Translate") { start() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(working != nil || target.isEmpty || !AI.isReady)
+            }
+            if !AI.isReady { Text(AI.notReadyMessage).font(.caption).foregroundStyle(.orange) }
+        }
+        .padding(22)
+        .frame(width: 520)
+    }
+
+    private func start() {
+        let lang = target
+        problem = nil
+        working = "Translating…"
+        task = Task {
+            do {
+                let copy = try await AI.translatedCopy(of: guide, to: lang, keepLabels: keepLabels) { done, total in
+                    Task { @MainActor in working = "Translating… \(min(done, total)) of \(total) pieces of text" }
+                }
+                if Task.isCancelled { return }
+                let id = GuideStore.shared.duplicate(guide, as: copy)
+                RootView.pendingSelection = id
+                dismiss()
+            } catch {
+                if !Task.isCancelled { problem = error.localizedDescription }
+                working = nil
+            }
+        }
+    }
+}
+
+/// Live drawings in the picture editor (the finished picture is drawn by Renderer).
+struct AnnotationOverlay: View {
+    let marks: [Annotation]
+    /// Screenshot pixels per point on screen.
+    let pixelsPerPoint: CGFloat
+    let unit: CGFloat
+    let selected: UUID?
+
+    var body: some View {
+        Canvas { ctx, _ in
+            let k = 1 / max(0.0001, pixelsPerPoint)
+            for m in marks {
+                let colour = Color(cgColor: m.colour.cg)
+                let edge = Color(white: m.colour == .white ? 0.15 : 1)
+                let mt = Renderer.metrics(m, unit: unit)
+                let line = mt.line * k
+                let a = CGPoint(x: m.a.x * k, y: m.a.y * k), b = CGPoint(x: m.b.x * k, y: m.b.y * k)
+                switch m.kind {
+                case .arrow:
+                    let dx = b.x - a.x, dy = b.y - a.y, len = max(1, hypot(dx, dy))
+                    let ux = dx / len, uy = dy / len
+                    let head = min(mt.head * 1.4 * k, len * 0.6), wing = head * 0.6
+                    let base = CGPoint(x: b.x - ux * head * 0.8, y: b.y - uy * head * 0.8)
+                    var shaft = Path(); shaft.move(to: a); shaft.addLine(to: base)
+                    var tip = Path()
+                    tip.move(to: b)
+                    tip.addLine(to: CGPoint(x: b.x - ux * head - uy * wing, y: b.y - uy * head + ux * wing))
+                    tip.addLine(to: CGPoint(x: b.x - ux * head + uy * wing, y: b.y - uy * head - ux * wing))
+                    tip.closeSubpath()
+                    ctx.stroke(shaft, with: .color(edge), style: StrokeStyle(lineWidth: line * 1.9, lineCap: .round))
+                    ctx.stroke(tip, with: .color(edge), style: StrokeStyle(lineWidth: line * 0.9, lineJoin: .round))
+                    ctx.stroke(shaft, with: .color(colour), style: StrokeStyle(lineWidth: line, lineCap: .round))
+                    ctx.fill(tip, with: .color(colour))
+                case .box, .circle:
+                    let r = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+                    let p = m.kind == .box ? Path(roundedRect: r, cornerRadius: min(10 * unit * k, r.width / 2, r.height / 2))
+                                           : Path(ellipseIn: r)
+                    ctx.stroke(p, with: .color(edge), style: StrokeStyle(lineWidth: line * 1.9))
+                    ctx.stroke(p, with: .color(colour), style: StrokeStyle(lineWidth: line))
+                case .text, .number:
+                    let br = Renderer.bounds(m, unit: unit)
+                    let r = CGRect(x: br.minX * k, y: br.minY * k, width: br.width * k, height: br.height * k)
+                    let p = m.kind == .number ? Path(ellipseIn: r) : Path(roundedRect: r, cornerRadius: mt.font * 0.4 * k)
+                    ctx.fill(p, with: .color(colour))
+                    ctx.stroke(p, with: .color(edge), lineWidth: 1.5)
+                    let label = Text(m.kind == .number ? (m.text.isEmpty ? "1" : m.text) : m.text)
+                        .font(.system(size: max(6, mt.font * k * (m.kind == .number ? 1.05 : 1)), weight: .semibold))
+                        .foregroundColor(m.colour.onColourIsDark ? .black : .white)
+                    if m.kind == .number {
+                        ctx.draw(label, at: CGPoint(x: r.midX, y: r.midY), anchor: .center)
+                    } else {
+                        let pad = mt.font * 0.55 * k
+                        ctx.draw(label, in: r.insetBy(dx: pad, dy: pad * 0.7))
+                    }
+                }
+                if m.id == selected {
+                    let br = Renderer.bounds(m, unit: unit)
+                    let r = CGRect(x: br.minX * k, y: br.minY * k, width: br.width * k, height: br.height * k).insetBy(dx: -4, dy: -4)
+                    ctx.stroke(Path(roundedRect: r, cornerRadius: 4), with: .color(.accentColor),
+                               style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                }
+            }
+        }
+    }
+}
 
 /// Per-picture zoom: whole screen, a little, close, or the guide's setting.
 struct StepZoomMenu: View {

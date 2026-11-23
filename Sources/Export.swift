@@ -8,6 +8,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
     case pdf = "PDF"
     case docx = "Word (.docx)"
     case html = "Web page (.html)"
+    case interactive = "Interactive demo (.html)"
     case markdown = "Markdown"
     case tutorial = "Tutorial video (.mp4)"
     case mp4 = "Simple slideshow video (.mp4)"
@@ -18,7 +19,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         switch self {
         case .pdf: return "pdf"
         case .docx: return "docx"
-        case .html: return "html"
+        case .html, .interactive: return "html"
         case .markdown: return "md"
         case .mp4, .tutorial: return "mp4"
         case .gif: return "gif"
@@ -65,6 +66,14 @@ enum Exporter {
             let items = await prepare(guide, store: store, maxWidth: 1920)
             try await VideoMaker.mp4(guide: guide, items: items, narrate: narrate, to: url, progress: progress)
             return
+        case .interactive:
+            progress("Rendering steps…")
+            let slides = await prepareInteractive(guide, store: store)
+            progress("Writing the interactive demo…")
+            try await Task.detached(priority: .userInitiated) {
+                try interactiveHTML(guide, slides).write(to: url, atomically: true, encoding: .utf8)
+            }.value
+            return
         case .gif:
             progress("Rendering steps…")
             let items = await prepare(guide, store: store, maxWidth: 1600)
@@ -84,6 +93,143 @@ enum Exporter {
             default: break
             }
         }.value
+    }
+
+    // MARK: Interactive demo (one offline .html file)
+
+    struct Slide {
+        let number: Int
+        let text: String
+        let jpeg: Data?
+        /// Where to click, as fractions of the picture (x, y, width, height).
+        let hotspot: CGRect?
+    }
+
+    static func prepareInteractive(_ guide: Guide, store: GuideStore) async -> [Slide] {
+        let jobs: [(Int, Step, URL?)] = await MainActor.run {
+            guide.steps.enumerated().map { (i, s) in (i + 1, s, s.image.map { store.imageURL(guide.id, $0) }) }
+        }
+        let zoom = guide.zoom
+        return await Task.detached(priority: .userInitiated) {
+            jobs.map { (n, s, url) -> Slide in
+                guard let base = url.flatMap(GuideStore.loadImage) else {
+                    return Slide(number: n, text: s.text, jpeg: nil, hotspot: nil)
+                }
+                // The demo draws its own pulsing hotspot, so leave the static box off the picture.
+                var clean = s
+                clean.showHighlight = false
+                let img = Renderer.render(clean, base: base, zoom: zoom, maxWidth: 1600)
+                let frame = Renderer.outputFrame(s, zoom: zoom, size: CGSize(width: base.width, height: base.height))
+                var spot: CGRect?
+                let clickKinds: [StepKind] = [.click, .rightClick, .doubleClick, .type]
+                if clickKinds.contains(s.kind) {
+                    let u = CGFloat(s.scale)
+                    let target = s.highlight ?? s.clickPoint.map { CGRect(x: $0.x - 22 * u, y: $0.y - 22 * u, width: 44 * u, height: 44 * u) }
+                    if let t = target?.insetBy(dx: -6 * u, dy: -6 * u).intersection(frame), !t.isNull, t.width > 2 {
+                        spot = CGRect(x: (t.minX - frame.minX) / frame.width, y: (t.minY - frame.minY) / frame.height,
+                                      width: t.width / frame.width, height: t.height / frame.height)
+                    }
+                }
+                return Slide(number: n, text: s.text, jpeg: img.flatMap { Renderer.jpeg($0, quality: 0.86) }, hotspot: spot)
+            }
+        }.value
+    }
+
+    static func interactiveHTML(_ g: Guide, _ slides: [Slide]) -> String {
+        func r4(_ v: CGFloat) -> String { String(format: "%.4f", Double(v)) }
+        let data: [String] = slides.map { sl in
+            let img = sl.jpeg.map { "\"data:image/jpeg;base64,\($0.base64EncodedString())\"" } ?? "null"
+            let hs = sl.hotspot.map { "[\(r4($0.minX)),\(r4($0.minY)),\(r4($0.width)),\(r4($0.height))]" } ?? "null"
+            let text = jsString(htmlInline(sl.text).replacingOccurrences(of: "\n", with: "<br>"))
+            return "{\"n\":\(sl.number),\"t\":\(text),\"img\":\(img),\"hs\":\(hs)}"
+        }
+        return """
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>\(esc(g.title))</title>
+        <style>
+        :root{--accent:#ff5440;--fg:#1d1d1f;--muted:#6e6e73;--bg:#f5f5f7;--card:#fff}
+        @media (prefers-color-scheme:dark){:root{--fg:#f5f5f7;--muted:#a1a1a6;--bg:#111;--card:#1c1c1e}}
+        *{box-sizing:border-box}
+        body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+        header{display:flex;align-items:center;gap:14px;padding:12px 20px}
+        header h1{font-size:16px;margin:0;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .count{color:var(--muted);font-size:14px;white-space:nowrap}
+        .bar{height:4px;background:rgba(127,127,127,.2)}.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+        main{flex:1;display:flex;align-items:center;justify-content:center;padding:20px}
+        .stage{position:relative;width:100%;max-width:1200px}
+        .stage img{display:block;width:100%;height:auto;border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.18);user-select:none;-webkit-user-drag:none}
+        .hs{position:absolute;border-radius:10px;cursor:pointer;border:3px solid var(--accent);background:rgba(255,84,64,.12)}
+        .hs::after{content:"";position:absolute;inset:-3px;border-radius:12px;border:3px solid var(--accent);animation:pulse 1.6s ease-out infinite}
+        @keyframes pulse{0%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(1.35)}}
+        .hs.nudge{animation:nudge .45s}
+        @keyframes nudge{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+        .tip{position:absolute;max-width:min(380px,90%);background:var(--card);color:var(--fg);border-radius:12px;padding:12px 14px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:15px;z-index:2}
+        .tip .num{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;font-size:13px;margin-right:8px;vertical-align:-5px}
+        .tip .hint{display:block;color:var(--muted);font-size:13px;margin-top:6px}
+        .tip button{margin-top:10px}
+        .card{background:var(--card);border-radius:16px;padding:40px;max-width:640px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.12)}
+        .card h2{font-size:30px;margin:0 0 10px;letter-spacing:-.02em}.card p{color:var(--muted);margin:0 0 24px;font-size:18px}
+        .note{background:var(--card);border-radius:16px;padding:34px;max-width:640px;font-size:20px;box-shadow:0 10px 40px rgba(0,0,0,.12)}
+        button{font:inherit;border:0;border-radius:999px;padding:9px 18px;cursor:pointer;background:rgba(127,127,127,.18);color:var(--fg)}
+        button.primary{background:var(--accent);color:#fff;font-weight:600}
+        button:disabled{opacity:.4;cursor:default}
+        footer{display:flex;justify-content:center;gap:10px;padding:0 20px 20px}
+        footer small{color:var(--muted);align-self:center;margin-left:8px}
+        </style></head><body>
+        <header><h1>\(esc(g.title))</h1><span class="count" id="count"></span></header>
+        <div class="bar"><i id="prog"></i></div>
+        <main id="main"></main>
+        <footer><button id="back">← Back</button><button id="next" class="primary">Next →</button><small>Tip: use the arrow keys</small></footer>
+        <script>
+        const S=[\(data.joined(separator: ",\n"))];
+        const TITLE=\(jsString(g.title.plain)), SUMMARY=\(jsString(g.summary.plain));
+        let i=-1;
+        const main=document.getElementById('main'),back=document.getElementById('back'),next=document.getElementById('next');
+        function show(n){
+          i=Math.max(-1,Math.min(S.length,n));
+          document.getElementById('prog').style.width=(i<0?0:Math.min(1,(i+1)/S.length)*100)+'%';
+          document.getElementById('count').textContent=(i>=0&&i<S.length)?('Step '+(i+1)+' of '+S.length):'';
+          back.disabled=i<0; next.style.visibility=(i>=S.length)?'hidden':'visible';
+          next.textContent=i<0?'Start →':(i===S.length-1?'Finish →':'Next →');
+          main.innerHTML='';
+          if(i<0){main.innerHTML='<div class="card"><h2></h2><p></p><button class="primary" onclick="show(0)">Start the walkthrough →</button></div>';
+            main.querySelector('h2').textContent=TITLE;main.querySelector('p').textContent=SUMMARY||(S.length+' steps');return}
+          if(i>=S.length){main.innerHTML='<div class="card"><h2>All done 🎉</h2><p>You’ve finished all '+S.length+' steps.</p><button class="primary" onclick="show(0)">Start again</button></div>';return}
+          const s=S[i];
+          if(!s.img){main.innerHTML='<div class="note"><span class="num" style="display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;font-size:14px;margin-right:10px">'+s.n+'</span>'+s.t+'</div>';return}
+          const st=document.createElement('div');st.className='stage';
+          const im=new Image();im.src=s.img;im.alt='Step '+s.n;st.appendChild(im);
+          const tip=document.createElement('div');tip.className='tip';
+          tip.innerHTML='<span class="num">'+s.n+'</span>'+s.t+(s.hs?'<span class="hint">Click the highlighted area to continue</span>':'<br><button class="primary">Next →</button>');
+          st.appendChild(tip);
+          if(s.hs){const h=document.createElement('div');h.className='hs';
+            h.style.left=s.hs[0]*100+'%';h.style.top=s.hs[1]*100+'%';h.style.width=s.hs[2]*100+'%';h.style.height=s.hs[3]*100+'%';
+            h.onclick=e=>{e.stopPropagation();show(i+1)};st.appendChild(h);
+            im.onclick=()=>{h.classList.remove('nudge');void h.offsetWidth;h.classList.add('nudge')};}
+          else{tip.querySelector('button').onclick=()=>show(i+1)}
+          main.appendChild(st);
+          const place=()=>{const W=st.clientWidth,H=st.clientHeight,tw=tip.offsetWidth,th=tip.offsetHeight;
+            if(!s.hs){tip.style.left=(W-tw)/2+'px';tip.style.top=Math.max(8,H-th-16)+'px';return}
+            const x=s.hs[0]*W,y=s.hs[1]*H,w=s.hs[2]*W,hh=s.hs[3]*H;
+            let left=Math.min(Math.max(8,x+w/2-tw/2),W-tw-8),top=y+hh+14;
+            if(top+th>H-8)top=y-th-14; if(top<8)top=Math.min(H-th-8,y+hh+14);
+            tip.style.left=left+'px';tip.style.top=Math.max(8,top)+'px'};
+          im.onload=place;if(im.complete)place();window.onresize=place;
+        }
+        back.onclick=()=>show(i-1);next.onclick=()=>show(i+1);
+        document.onkeydown=e=>{if(e.key==='ArrowRight'||e.key==='Enter')show(i+1);if(e.key==='ArrowLeft')show(i-1)};
+        show(-1);
+        </script>
+        </body></html>
+        """
+    }
+
+    /// A JavaScript string literal.
+    static func jsString(_ s: String) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8)
+        let arr = String(decoding: data, as: UTF8.self)
+        return String(arr.dropFirst().dropLast()).replacingOccurrences(of: "</", with: "<\\/")
     }
 
     // MARK: HTML

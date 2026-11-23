@@ -66,6 +66,8 @@ enum Renderer {
                 ctx.fillEllipse(in: dot.insetBy(dx: rad * 0.6, dy: rad * 0.6))
             }
         }
+        // Drawings: arrows, boxes, circles, labels, numbers.
+        for m in step.marks { drawAnnotation(m, in: ctx, unit: u) }
         guard var out = ctx.makeImage() else { return nil }
 
         // 3. Crop, or zoom in around the click.
@@ -75,6 +77,126 @@ enum Renderer {
         }
         if let m = maxWidth, out.width > m { return scaled(out, width: m) ?? out }
         return out
+    }
+
+    /// The part of the screenshot the finished picture shows (its crop or automatic zoom), in pixels.
+    static func outputFrame(_ step: Step, zoom: Zoom, size: CGSize) -> CGRect {
+        let full = CGRect(origin: .zero, size: size)
+        if let c = step.crop ?? autoZoom(step, zoom: step.zoomOverride ?? zoom, size: size) {
+            let r = c.integral.intersection(full)
+            if !r.isNull, r.width > 10, r.height > 10 { return r }
+        }
+        return full
+    }
+
+    // MARK: Drawings
+
+    /// Line width, arrow-head size and text size for a drawing, in pixels.
+    static func metrics(_ m: Annotation, unit u: CGFloat) -> (line: CGFloat, head: CGFloat, font: CGFloat) {
+        let k = CGFloat(m.size) * u
+        return (4 * k, 18 * k, 16 * k)
+    }
+
+    static func labelText(_ m: Annotation, unit u: CGFloat) -> NSAttributedString {
+        let f = metrics(m, unit: u).font
+        let text = m.kind == .number ? (m.text.isEmpty ? "1" : m.text) : (m.text.isEmpty ? " " : m.text)
+        let colour: NSColor = m.colour.onColourIsDark ? .black : .white
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: m.kind == .number ? f * 1.05 : f, weight: .semibold),
+            .foregroundColor: colour,
+        ])
+    }
+
+    /// The area a drawing covers, for clicking on it in the editor.
+    static func bounds(_ m: Annotation, unit u: CGFloat) -> CGRect {
+        let mt = metrics(m, unit: u)
+        switch m.kind {
+        case .arrow:
+            return CGRect(x: min(m.a.x, m.b.x), y: min(m.a.y, m.b.y), width: abs(m.a.x - m.b.x), height: abs(m.a.y - m.b.y))
+                .insetBy(dx: -mt.head, dy: -mt.head)
+        case .box, .circle:
+            return CGRect(x: min(m.a.x, m.b.x), y: min(m.a.y, m.b.y), width: abs(m.a.x - m.b.x), height: abs(m.a.y - m.b.y))
+                .insetBy(dx: -mt.line * 2, dy: -mt.line * 2)
+        case .text:
+            let size = labelText(m, unit: u).boundingRect(with: CGSize(width: 420 * u, height: .greatestFiniteMagnitude),
+                                                          options: [.usesLineFragmentOrigin, .usesFontLeading]).size
+            let pad = mt.font * 0.55
+            return CGRect(x: m.a.x, y: m.a.y, width: ceil(size.width) + pad * 2, height: ceil(size.height) + pad * 1.4)
+        case .number:
+            let r = mt.font * 1.15
+            return CGRect(x: m.a.x - r, y: m.a.y - r, width: r * 2, height: r * 2)
+        }
+    }
+
+    /// Draws one annotation. `ctx` uses top-left coordinates.
+    static func drawAnnotation(_ m: Annotation, in ctx: CGContext, unit u: CGFloat) {
+        let mt = metrics(m, unit: u)
+        let colour = m.colour.cg
+        let outline = CGColor(gray: m.colour == .white ? 0.15 : 1, alpha: 0.95)
+        ctx.saveGState()
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        switch m.kind {
+        case .arrow:
+            let dx = m.b.x - m.a.x, dy = m.b.y - m.a.y
+            let len = max(1, hypot(dx, dy))
+            let ux = dx / len, uy = dy / len
+            let head = min(mt.head * 1.4, len * 0.6)
+            let base = CGPoint(x: m.b.x - ux * head * 0.8, y: m.b.y - uy * head * 0.8)
+            let wing = head * 0.6
+            let left = CGPoint(x: m.b.x - ux * head - uy * wing, y: m.b.y - uy * head + ux * wing)
+            let right = CGPoint(x: m.b.x - ux * head + uy * wing, y: m.b.y - uy * head - ux * wing)
+            let headPath = CGMutablePath()
+            headPath.move(to: m.b); headPath.addLine(to: left); headPath.addLine(to: right); headPath.closeSubpath()
+            // White edge first, so the arrow shows on any background.
+            let edge = mt.line * 0.9
+            ctx.setStrokeColor(outline)
+            ctx.setLineWidth(mt.line + edge)
+            ctx.move(to: m.a); ctx.addLine(to: base); ctx.strokePath()
+            ctx.setFillColor(outline)
+            ctx.setLineWidth(edge)
+            ctx.addPath(headPath); ctx.drawPath(using: .fillStroke)
+            // Then the colour.
+            ctx.setStrokeColor(colour)
+            ctx.setLineWidth(mt.line)
+            ctx.move(to: m.a); ctx.addLine(to: base); ctx.strokePath()
+            ctx.setFillColor(colour)
+            ctx.addPath(headPath); ctx.fillPath()
+        case .box, .circle:
+            let r = CGRect(x: min(m.a.x, m.b.x), y: min(m.a.y, m.b.y), width: abs(m.a.x - m.b.x), height: abs(m.a.y - m.b.y))
+            let path = m.kind == .box
+                ? CGPath(roundedRect: r, cornerWidth: min(10 * u, r.width / 2), cornerHeight: min(10 * u, r.height / 2), transform: nil)
+                : CGPath(ellipseIn: r, transform: nil)
+            for (c, extra) in [(outline, mt.line * 0.9), (colour, 0)] {
+                ctx.setStrokeColor(c)
+                ctx.setLineWidth(mt.line + extra)
+                ctx.addPath(path); ctx.strokePath()
+            }
+        case .text, .number:
+            let rect = bounds(m, unit: u)
+            let path = m.kind == .number
+                ? CGPath(ellipseIn: rect, transform: nil)
+                : CGPath(roundedRect: rect, cornerWidth: mt.font * 0.4, cornerHeight: mt.font * 0.4, transform: nil)
+            ctx.setShadow(offset: CGSize(width: 0, height: 2 * u), blur: 6 * u, color: CGColor(gray: 0, alpha: 0.35))
+            ctx.setFillColor(colour)
+            ctx.addPath(path); ctx.fillPath()
+            ctx.setShadow(offset: .zero, blur: 0, color: nil)
+            ctx.setStrokeColor(outline)
+            ctx.setLineWidth(max(1.5, 1.5 * u))
+            ctx.addPath(path); ctx.strokePath()
+            let text = labelText(m, unit: u)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+            if m.kind == .number {
+                let sz = text.size()
+                text.draw(at: CGPoint(x: rect.midX - sz.width / 2, y: rect.midY - sz.height / 2))
+            } else {
+                let pad = mt.font * 0.55
+                text.draw(with: rect.insetBy(dx: pad, dy: pad * 0.7), options: [.usesLineFragmentOrigin, .usesFontLeading])
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        ctx.restoreGState()
     }
 
     /// A 16:10 window around the clicked element, kept inside the screenshot.

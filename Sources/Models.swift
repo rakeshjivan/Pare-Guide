@@ -37,6 +37,47 @@ struct Step: Codable, Identifiable, Equatable {
     var time = Date()
     /// What the narrator says for this step in tutorial videos (nil = read the step text).
     var narration: String?
+    /// Arrows, boxes, circles, text labels and numbers drawn on the picture.
+    var annotations: [Annotation]?
+
+    /// The drawings, never nil (saved as nil when empty so older guides stay readable).
+    var marks: [Annotation] {
+        get { annotations ?? [] }
+        set { annotations = newValue.isEmpty ? nil : newValue }
+    }
+}
+
+/// Something drawn on a step's picture. Points are in screenshot pixels, top-left origin.
+struct Annotation: Codable, Identifiable, Equatable {
+    enum Kind: String, Codable, CaseIterable { case arrow, box, circle, text, number }
+    enum Colour: String, Codable, CaseIterable, Identifiable {
+        case red, orange, yellow, green, blue, purple, black, white
+        var id: String { rawValue }
+        var rgb: (CGFloat, CGFloat, CGFloat) {
+            switch self {
+            case .red: return (0.93, 0.20, 0.20)
+            case .orange: return (1.0, 0.45, 0.10)
+            case .yellow: return (1.0, 0.82, 0.10)
+            case .green: return (0.15, 0.68, 0.33)
+            case .blue: return (0.10, 0.45, 0.95)
+            case .purple: return (0.55, 0.30, 0.90)
+            case .black: return (0.10, 0.10, 0.12)
+            case .white: return (1, 1, 1)
+            }
+        }
+        var cg: CGColor { let c = rgb; return CGColor(red: c.0, green: c.1, blue: c.2, alpha: 1) }
+        /// Text on a filled label: dark on light colours, white otherwise.
+        var onColourIsDark: Bool { self == .yellow || self == .white }
+    }
+    var id = UUID()
+    var kind: Kind
+    /// Arrow: from a (tail) to b (point). Box and circle: corners a and b. Text and number: a is the top-left / centre.
+    var a: CGPoint
+    var b: CGPoint
+    var text: String = ""
+    var colour: Colour = .red
+    /// 0.7 small, 1 medium, 1.5 large.
+    var size: Double = 1
 }
 
 enum Zoom: String, Codable, CaseIterable, Identifiable {
@@ -112,6 +153,22 @@ final class GuideStore: ObservableObject {
         try? FileManager.default.createDirectory(at: imagesFolder(guide.id), withIntermediateDirectories: true)
         guides.insert(guide, at: 0)
         write(guide)
+    }
+
+    /// A copy of a guide with its own folder and screenshots (used for translations).
+    @discardableResult
+    func duplicate(_ source: Guide, as copy: Guide) -> UUID {
+        var g = copy
+        g.id = UUID()
+        g.created = Date()
+        g.modified = Date()
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder(g.id), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: imagesFolder(source.id).path) {
+            try? fm.copyItem(at: imagesFolder(source.id), to: imagesFolder(g.id))
+        }
+        create(g)
+        return g.id
     }
 
     /// Saves changes. Keeps an earlier version at most every 30 seconds so you can roll back.

@@ -704,3 +704,95 @@ extension AI {
         return out
     }
 }
+
+// MARK: - Translation
+
+extension AI {
+    static let translationLanguages = [
+        "English", "Chinese (Simplified)", "Chinese (Traditional)", "Japanese", "Korean", "Vietnamese", "Thai",
+        "Indonesian", "Malay", "Filipino", "Hindi", "Arabic", "Spanish", "French", "German", "Italian", "Portuguese",
+        "Dutch", "Greek", "Turkish", "Polish", "Russian",
+    ]
+
+    /// Translates a list of strings, keeping **bold** markers. Returns the same number of strings.
+    static func translate(_ texts: [String], to language: String, keepLabels: Bool, title: String,
+                          progress: @escaping (Int, Int) -> Void) async throws -> [String] {
+        guard !texts.isEmpty else { return [] }
+        // Apple's on-device model has a small memory, so it gets smaller batches.
+        let usesApple = provider == .apple || (provider == .claudeCode && ClaudeCLI.find() == nil)
+        let chunk = usesApple ? 8 : 30
+        var out: [String] = []
+        var start = 0
+        while start < texts.count {
+            try Task.checkCancellation()
+            let part = Array(texts[start..<min(start + chunk, texts.count)])
+            progress(start, texts.count)
+            let list = part.enumerated().map { i, t in "\(i + 1). \(jsonString(t))" }.joined(separator: "\n")
+            let labelRule = keepLabels
+                ? "Words inside **double asterisks** are on-screen labels: copy them EXACTLY as written, untranslated, because the screenshots show them in the original language. Keep the asterisks."
+                : "Words inside **double asterisks** are on-screen labels: translate them too, and keep the asterisks around them."
+            let prompt = """
+            Translate these strings from a how-to guide\(title.isEmpty ? "" : " called \"\(title)\"") into \(language).
+            Rules:
+            - \(labelRule)
+            - Keep anything the person typed (in quotation marks), keyboard shortcuts like ⌘C, app names, file names and web addresses unchanged.
+            - Natural, clear \(language) for a beginner. Same meaning, no extra words.
+            - An empty string stays empty.
+            Strings (JSON-escaped):
+            \(list)
+            Reply with ONLY a JSON array of exactly \(part.count) strings, in the same order. No other text.
+            """
+            let reply = try await askText(prompt, maxTokens: 4000)
+            guard let a = reply.firstIndex(of: "["), let b = reply.lastIndex(of: "]"), a < b,
+                  let data = String(reply[a...b]).data(using: .utf8),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [String], arr.count == part.count else {
+                throw PGError("The translation came back in the wrong shape. Try again.")
+            }
+            out += zip(part, arr).map { orig, new in orig.trimmed.isEmpty ? orig : new.trimmed }
+            start += chunk
+        }
+        progress(texts.count, texts.count)
+        return out
+    }
+
+    private static func jsonString(_ s: String) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8)
+        return String(String(decoding: data, as: UTF8.self).dropFirst().dropLast())
+    }
+
+    /// A translated copy of a guide (same screenshots, drawings and settings).
+    static func translatedCopy(of g: Guide, to language: String, keepLabels: Bool,
+                               progress: @escaping (Int, Int) -> Void) async throws -> Guide {
+        // Gather every piece of text, remembering where it goes back.
+        enum Slot { case title, summary, intro, outro, step(Int), narration(Int), mark(Int, Int) }
+        var slots: [Slot] = []
+        var texts: [String] = []
+        func add(_ slot: Slot, _ t: String?) {
+            guard let t, !t.trimmed.isEmpty else { return }
+            slots.append(slot); texts.append(t)
+        }
+        add(.title, g.title)
+        add(.summary, g.summary)
+        add(.intro, g.introNarration)
+        add(.outro, g.outroNarration)
+        for (i, s) in g.steps.enumerated() {
+            add(.step(i), s.text)
+            add(.narration(i), s.narration)
+            for (j, m) in s.marks.enumerated() where m.kind == .text { add(.mark(i, j), m.text) }
+        }
+        let done = try await translate(texts, to: language, keepLabels: keepLabels, title: g.title.plain, progress: progress)
+        var c = g
+        for (slot, t) in zip(slots, done) {
+            switch slot {
+            case .title: c.title = t
+            case .summary: c.summary = t
+            case .intro: c.introNarration = t.plain
+            case .outro: c.outroNarration = t.plain
+            case .step(let i): c.steps[i].text = t
+            case .narration(let i): c.steps[i].narration = t.plain
+            case .mark(let i, let j): c.steps[i].marks[j].text = t.plain
+            }
+        }
+        return c
+    }
+}
