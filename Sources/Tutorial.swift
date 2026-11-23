@@ -266,34 +266,61 @@ enum TutorialVideo {
             let n = frames(shot.duration)
             var clip: ClipReader?
             if case .clip(let u) = shot.content { clip = try? ClipReader(url: u) }
-            for fi in 0..<n {
-                let t = Double(fi) / Double(fps)
-                while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 5_000_000) }
-                guard let pb = buffer(adaptor.pixelBufferPool) else { throw PGError("Out of memory making the video.") }
-                CVPixelBufferLockBaseAddress(pb, [])
-                guard let ctx = CGContext(data: CVPixelBufferGetBaseAddress(pb), width: Int(W), height: Int(H),
-                                          bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
-                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-                else { CVPixelBufferUnlockBaseAddress(pb, []); continue }
-                ctx.interpolationQuality = .high
-                draw(shot, t: t, look: look, clip: clip, in: ctx)
-                // Crossfade from the end of the last part, or fade in/out at the very start and end.
-                if si > 0, t < crossfade, let last {
-                    ctx.saveGState()
-                    ctx.setAlpha(1 - seg(t, 0, crossfade))
-                    ctx.draw(last, in: CGRect(x: 0, y: 0, width: W, height: H))
-                    ctx.restoreGState()
+            // Frames are drawn on every processor core at once, then added to the video in order.
+            // (Intro/outro video clips are read in order, so those frames are drawn one at a time.)
+            let batch = clip == nil ? max(2, ProcessInfo.processInfo.activeProcessorCount) : 1
+            var fi = 0
+            while fi < n {
+                let range = fi..<min(fi + batch, n)
+                var bufs: [CVPixelBuffer] = []
+                for _ in range {
+                    guard let pb = buffer(adaptor.pixelBufferPool) else { throw PGError("Out of memory making the video.") }
+                    bufs.append(pb)
                 }
-                if si == 0, t < 0.5 { fill(ctx, .white, alpha: 1 - seg(t, 0, 0.5)) }
-                if si == shots.count - 1, t > shot.duration - 0.5 { fill(ctx, .white, alpha: seg(t, shot.duration - 0.5, shot.duration)) }
-                if fi == n - 1 { last = ctx.makeImage() }
-                CVPixelBufferUnlockBaseAddress(pb, [])
-                adaptor.append(pb, withPresentationTime: CMTime(value: frameIndex, timescale: fps))
-                frameIndex += 1
-                if frameIndex % 60 == 0 {
-                    progress("Building the video… \(Int(Double(frameIndex) / Double(max(1, totalFrames)) * 100))%")
+                let previous = last
+                let frameBuffers = bufs
+                let clipReader = clip
+                let endImage = ImageBox()
+                let isLastShot = si == shots.count - 1
+                let drawOne: (Int) -> Void = { k in
+                    let f = range.lowerBound + k
+                    let t = Double(f) / Double(fps)
+                    let pb = frameBuffers[k]
+                    CVPixelBufferLockBaseAddress(pb, [])
+                    defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+                    guard let ctx = CGContext(data: CVPixelBufferGetBaseAddress(pb), width: Int(W), height: Int(H),
+                                              bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+                    else { return }
+                    ctx.interpolationQuality = .high
+                    draw(shot, t: t, look: look, clip: clipReader, in: ctx)
+                    // Crossfade from the end of the last part, or fade in/out at the very start and end.
+                    if si > 0, t < crossfade, let previous {
+                        ctx.saveGState()
+                        ctx.setAlpha(1 - seg(t, 0, crossfade))
+                        ctx.draw(previous, in: CGRect(x: 0, y: 0, width: W, height: H))
+                        ctx.restoreGState()
+                    }
+                    if si == 0, t < 0.5 { fill(ctx, .white, alpha: 1 - seg(t, 0, 0.5)) }
+                    if isLastShot, t > shot.duration - 0.5 { fill(ctx, .white, alpha: seg(t, shot.duration - 0.5, shot.duration)) }
+                    if f == n - 1 { endImage.set(ctx.makeImage()) }
                 }
+                if bufs.count > 1 {
+                    DispatchQueue.concurrentPerform(iterations: bufs.count, execute: drawOne)
+                } else {
+                    drawOne(0)
+                }
+                if let img = endImage.get() { last = img }
+                for pb in bufs {
+                    while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
+                    adaptor.append(pb, withPresentationTime: CMTime(value: frameIndex, timescale: fps))
+                    frameIndex += 1
+                    if frameIndex % 60 == 0 {
+                        progress("Building the video… \(Int(Double(frameIndex) / Double(max(1, totalFrames)) * 100))%")
+                    }
+                }
+                fi = range.upperBound
             }
         }
         input.markAsFinished()
@@ -620,6 +647,14 @@ enum TutorialVideo {
 }
 
 // MARK: - Reading frames from an intro/outro clip
+
+/// Holds one image handed back from a frame drawn on another core.
+final class ImageBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var image: CGImage?
+    func set(_ i: CGImage?) { lock.withLock { image = i } }
+    func get() -> CGImage? { lock.withLock { image } }
+}
 
 final class ClipReader {
     private let reader: AVAssetReader
