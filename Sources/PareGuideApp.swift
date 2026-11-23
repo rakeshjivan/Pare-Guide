@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { GuideStore.shared.flush() }
         PareVoice.stop()
         MainActor.assumeIsolated { Updater.shared.install(relaunch: false) }
     }

@@ -476,8 +476,13 @@ struct GuideEditor: View {
                     ForEach(Array(g.steps.enumerated()), id: \.element.id) { i, step in
                         scriptRow(badge: "\(i + 1)", picture: step) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(step.text.plain.isEmpty ? "(no step text)" : step.text.plain)
-                                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                if !(step.narration ?? "").trimmed.isEmpty {
+                                    Text("Step: " + step.text.plain)
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                } else {
+                                    Text("Reading the step text — type to change what's said")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                                 NarrationField(label: nil,
                                                text: Binding(get: { stepBinding(step.id).wrappedValue.narration ?? "" },
                                                              set: { v in stepBinding(step.id).wrappedValue.narration = v.isEmpty ? nil : v }),
@@ -504,7 +509,7 @@ struct GuideEditor: View {
         HStack(alignment: .top, spacing: 14) {
             ZStack(alignment: .topLeading) {
                 if let step = picture, step.image != nil {
-                    StepPicture(guideID: guideID, step: step, zoom: guide.wrappedValue.zoom, maxWidth: 320)
+                    StepPicture(guideID: guideID, step: step, zoom: .close, maxWidth: 400)
                         .aspectRatio(16 / 10, contentMode: .fit)
                 } else {
                     RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12))
@@ -658,9 +663,21 @@ struct StepPicture: View {
     var maxWidth = 1100
     @State private var image: NSImage?
 
-    private var key: String {
-        "\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)"
+    /// Finished pictures kept in memory, so scrolling and switching views never re-draws them.
+    static let cache: NSCache<NSString, NSImage> = { let c = NSCache<NSString, NSImage>(); c.totalCostLimit = 400_000_000; return c }()
+
+    init(guideID: UUID, step: Step, zoom: Zoom, maxWidth: Int = 1100) {
+        self.guideID = guideID
+        self.step = step
+        self.zoom = zoom
+        self.maxWidth = maxWidth
+        _image = State(initialValue: Self.cache.object(forKey: Self.key(guideID, step, zoom, maxWidth) as NSString))
     }
+
+    private static func key(_ g: UUID, _ step: Step, _ zoom: Zoom, _ w: Int) -> String {
+        "\(g)|\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)|\(w)"
+    }
+    private var key: String { Self.key(guideID, step, zoom, maxWidth) }
 
     var body: some View {
         Group {
@@ -672,13 +689,18 @@ struct StepPicture: View {
             }
         }
         .task(id: key) {
+            if let hit = Self.cache.object(forKey: key as NSString) { image = hit; return }
             guard let name = step.image else { return }
             let url = GuideStore.shared.imageURL(guideID, name)
             let s = step, z = zoom, m = maxWidth
             let cg = await Task.detached(priority: .userInitiated) {
                 GuideStore.loadImage(url).flatMap { Renderer.render(s, base: $0, zoom: z, maxWidth: m) }
             }.value
-            if let cg { image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)) }
+            if let cg {
+                let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                Self.cache.setObject(img, forKey: key as NSString, cost: cg.width * cg.height * 4)
+                image = img
+            }
         }
     }
 }

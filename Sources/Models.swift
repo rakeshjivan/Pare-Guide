@@ -129,14 +129,42 @@ final class GuideStore: ObservableObject {
     }
 
     func delete(_ id: UUID) {
+        pendingWrites[id]?.cancel()
+        pendingWrites[id] = nil
         guides.removeAll { $0.id == id }
         try? FileManager.default.removeItem(at: folder(id))
     }
 
+    /// Saving waits until typing pauses, then writes in the background, so editing never stutters.
+    private var pendingWrites: [UUID: Task<Void, Never>] = [:]
+
     private func write(_ g: Guide) {
-        if let data = try? Self.encoder.encode(g) {
-            try? data.write(to: folder(g.id).appendingPathComponent("guide.json"), options: .atomic)
+        pendingWrites[g.id]?.cancel()
+        pendingWrites[g.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.pendingWrites[g.id] = nil
+            self.writeNow(g, background: true)
         }
+    }
+
+    private func writeNow(_ g: Guide, background: Bool) {
+        guard let data = try? Self.encoder.encode(g) else { return }
+        let url = folder(g.id).appendingPathComponent("guide.json")
+        if background {
+            Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Saves anything still waiting (called when the app quits).
+    func flush() {
+        for (id, t) in pendingWrites {
+            t.cancel()
+            if let g = guide(id) { writeNow(g, background: false) }
+        }
+        pendingWrites = [:]
     }
 
     private func snapshot(_ g: Guide) {
