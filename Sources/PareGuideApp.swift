@@ -206,7 +206,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Pare Guide").font(.system(size: 34, weight: .bold))
-                    Text("Do a task once on your Mac. Pare Guide turns every click and entry into a step-by-step guide with screenshots, then exports it as a PDF, Word file, web page, video or GIF.")
+                    Text("Do a task once on your Mac. Pare Guide turns every click and entry into a step-by-step guide with screenshots, then exports it as a PDF, Word file, web page or GIF — or a narrated tutorial video in your own voice.")
                         .font(.title3).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

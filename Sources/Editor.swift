@@ -15,13 +15,16 @@ struct GuideEditor: View {
     @State private var errorText: String?
     @State private var scanning = false
     @State private var aiTask: Task<Void, Never>?
-    @AppStorage("showNarration") private var showNarration = true
     /// 0 Steps, 1 Grid, 2 Script.
     @AppStorage("editorLayout") private var layout = 0
-    @AppStorage("captionsOn") private var captionsOn = true
-    @AppStorage("captionSize") private var captionSize = 1
-    @AppStorage("captionPosition") private var captionPosition = "auto"
-    @AppStorage("captionShort") private var captionShort = false
+    @AppStorage("narratorKind") private var voiceKindSetting = ""
+    @AppStorage("pareVoiceName") private var voiceNameSetting = ""
+    @AppStorage("pareVoiceMode") private var voiceModeSetting = ""
+    @AppStorage("pareVoiceExpressiveness") private var voiceExprSetting = 0.45
+    @AppStorage("pareVoicePace") private var voicePaceSetting = 0.5
+    @State private var linesReady = 0
+    @State private var linesTotal = 0
+    @FocusState private var titleFocused: Bool
     @State private var picked = Set<UUID>()
     @State private var lastPicked: Int?
     /// Earlier states of this guide, newest last, for the Undo button.
@@ -88,7 +91,7 @@ struct GuideEditor: View {
         }
         .onAppear {
             scanning = AutoBlur.scanning.contains(guideID)
-            if showNarration { PareVoice.warmUp() }   // so the first tutorial export starts quickly
+            PareVoice.warmUp()   // so playing a line or making a video starts quickly
         }
         .onDisappear { aiTask?.cancel() }
     }
@@ -173,7 +176,7 @@ struct GuideEditor: View {
             List {
                 ForEach(Array(guide.wrappedValue.steps.enumerated()), id: \.element.id) { i, step in
                     StepRow(guideID: guideID, step: stepBinding(step.id), number: i + 1, zoom: guide.wrappedValue.zoom,
-                            showNarration: showNarration,
+                            showNarration: false,
                             onEditPicture: { editing = StepRef(id: step.id) },
                             onDelete: { delete(step.id) },
                             onAI: { writeWithAI(only: step.id) })
@@ -197,46 +200,48 @@ struct GuideEditor: View {
             .listStyle(.inset)
     }
 
+    private var isUnnamed: Bool {
+        let t = guide.wrappedValue.title.trimmed
+        return t.isEmpty || t.hasPrefix("New guide")
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             TextField("Guide title", text: guide.title)
                 .textFieldStyle(.plain)
                 .font(.system(size: 24, weight: .bold))
+                .focused($titleFocused)
+            if isUnnamed {
+                HStack(spacing: 10) {
+                    Image(systemName: "pencil.line").foregroundStyle(Color(cgColor: Renderer.accent))
+                    Text("Give this guide a name. It's the title of the guide and is read out in the video intro.")
+                    Spacer()
+                    Button("Type a Name") {
+                        var g = guide.wrappedValue; g.title = ""; guide.wrappedValue = g
+                        titleFocused = true
+                    }
+                    Button("Suggest a Name") { writeTitle() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(busy != nil)
+                }
+                .font(.callout)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(cgColor: Renderer.accent).opacity(0.1)))
+            }
             TextField("Add a one-line summary (optional)", text: guide.summary, axis: .vertical)
                 .textFieldStyle(.plain)
                 .foregroundStyle(.secondary)
-            HStack {
-                Picker("Pictures", selection: guide.zoom) {
-                    ForEach(Zoom.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 420)
-                Spacer()
-                Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if showNarration || layout == 2 {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 10) {
-                        Picker("Intro & outro", selection: brandChoice) {
-                            let def = brands.brand(nil)?.name ?? "None"
-                            Text("Default (\(def))").tag("")
-                            ForEach(brands.all) { Text($0.name).tag($0.id) }
-                            Text("None").tag(Brand.noneID)
-                        }
-                        .frame(maxWidth: 320)
-                        SettingsLink { Text("Edit…") }.controlSize(.small)
-                        Spacer()
-                        VoiceQuickPicker()
+            if layout != 2 {
+                HStack {
+                    Picker("Pictures", selection: guide.zoom) {
+                        ForEach(Zoom.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    if layout != 2 {
-                        NarrationField(label: "Intro", text: text(\.introNarration),
-                                       placeholder: "Spoken over the intro. Leave blank to read the title.")
-                        NarrationField(label: "Outro", text: text(\.outroNarration),
-                                       placeholder: "Spoken over the closing card (optional).")
-                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 420)
+                    Spacer()
+                    Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(.top, 4)
             }
         }
         .padding(.horizontal, 20)
@@ -274,10 +279,12 @@ struct GuideEditor: View {
         }
         ToolbarItem {
             Button { undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                .labelStyle(.titleAndIcon)
                 .disabled(undoStack.isEmpty)
                 .help(undoStack.last.map { "Undo \($0.what)" } ?? "Nothing to undo")
         }
         ToolbarItemGroup {
+            Group {
             Menu {
                 Button("Write Every Step") { writeWithAI(only: nil) }
                 Button("Write Title and Summary") { writeTitle() }
@@ -290,11 +297,8 @@ struct GuideEditor: View {
                 .disabled(busy != nil)
                 .help("Uses your Claude subscription, Apple Intelligence or an API key (Settings › AI)")
 
-            Toggle(isOn: $showNarration) { Label("Narration", systemImage: "waveform") }
-                .help("Show the narration lines used in tutorial videos")
-
             Button { AutoBlur.scan(guideID: guideID, force: true) } label: {
-                Label("Blur Private Details", systemImage: "eye.slash")
+                Label("Blur", systemImage: "eye.slash")
             }
             .help("Find emails, phone and card numbers in every screenshot and blur them")
 
@@ -309,25 +313,15 @@ struct GuideEditor: View {
 
             Menu {
                 Button("Tutorial Video (.mp4)") { export(.tutorial, narrate: true) }
-                Menu("Captions") {
-                    Toggle("Show Captions", isOn: $captionsOn)
-                    Divider()
-                    Picker("Size", selection: $captionSize) {
-                        Text("Small").tag(0); Text("Medium").tag(1); Text("Large").tag(2)
-                    }
-                    Picker("Position", selection: $captionPosition) {
-                        Text("Auto (moves away from the click)").tag("auto")
-                        Text("Bottom").tag("bottom")
-                        Text("Top").tag("top")
-                    }
-                    Toggle("Short Captions (one line)", isOn: $captionShort)
-                }
+                CaptionsMenu()
                 Divider()
                 ForEach(ExportFormat.allCases.filter { $0 != .tutorial }) { f in
                     Button(f.rawValue) { export(f, narrate: false) }
                     if f == .mp4 { Button("Simple slideshow with Mac narration (.mp4)") { export(.mp4, narrate: true) } }
                 }
             } label: { Label("Export", systemImage: "square.and.arrow.up") }
+            }
+            .labelStyle(.titleAndIcon)
                 .disabled(busy != nil || guide.wrappedValue.steps.isEmpty)
         }
     }
@@ -419,7 +413,7 @@ struct GuideEditor: View {
                 if !script.outro.isEmpty { now.outroNarration = script.outro }
                 for i in now.steps.indices { if let l = script.steps[now.steps[i].id] { now.steps[i].narration = l } }
                 store.update(now, forceSnapshot: true)
-                showNarration = true
+                layout = 2
             } catch {
                 if !Task.isCancelled { errorText = error.localizedDescription }
             }
@@ -439,7 +433,6 @@ struct GuideEditor: View {
                 var now = guide.wrappedValue
                 for i in now.steps.indices { if let l = lines[now.steps[i].id] { now.steps[i].narration = l } }
                 store.update(now, forceSnapshot: true)
-                showNarration = true
                 layout = 2
             } catch {
                 if !Task.isCancelled { errorText = error.localizedDescription }
@@ -455,15 +448,45 @@ struct GuideEditor: View {
             + g.steps.reduce(0) { $0 + Narrator.estimate(($1.narration ?? "").isEmpty ? $1.text : $1.narration!) }
             + Narrator.estimate(g.outroNarration ?? "")
         return VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "waveform").foregroundStyle(Color(cgColor: Renderer.accent))
-                Text("Voiceover script").font(.headline)
-                Text("about \(Self.duration(total)) of speaking").foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                VoiceQuickPicker()
+                CaptionsMenu().fixedSize()
+                Picker("Intro & outro", selection: brandChoice) {
+                    let def = brands.brand(nil)?.name ?? "None"
+                    Text("Intro & outro: \(def)").tag("")
+                    ForEach(brands.all) { Text("Intro & outro: \($0.name)").tag($0.id) }
+                    Text("No intro or outro").tag(Brand.noneID)
+                }
+                .labelsHidden()
+                .fixedSize()
                 Spacer()
-                Text("Press ▶ Play to hear a line. Blank lines read the step text.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Button { export(.tutorial, narrate: true) } label: {
+                    Label("Make Video", systemImage: "film")
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(busy != nil)
+                .help("Export this guide as a narrated tutorial video (.mp4)")
             }
             .padding(.horizontal, 20).padding(.vertical, 10)
+            HStack(spacing: 8) {
+                Text("About \(Self.duration(total)) of speaking").foregroundStyle(.secondary)
+                if linesTotal > 0 {
+                    Text("·").foregroundStyle(.secondary)
+                    if linesReady < linesTotal {
+                        ProgressView().controlSize(.mini)
+                        Text("Preparing the voice: \(linesReady) of \(linesTotal) lines ready").foregroundStyle(.secondary)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        Text("Voice ready — the video will be quick to make").foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Text("▶ Play hears a line. A blank line reads the step text.").foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .padding(.horizontal, 20).padding(.bottom, 8)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -503,6 +526,44 @@ struct GuideEditor: View {
             }
         }
         .onDisappear { NarrationPlayer.shared.stop() }
+        .task(id: prefetchKey) { await prepareVoice() }
+    }
+
+    // MARK: Make the voice in the background, so Make Video is quick
+
+    /// Every line the video will say, in order.
+    private var spokenLines: [String] {
+        let g = guide.wrappedValue
+        var out: [String] = []
+        if brands.brand(g.brandID) != nil { out.append((g.introNarration ?? "").trimmed.isEmpty ? g.title : g.introNarration!) }
+        for st in g.steps {
+            let c = (st.narration ?? "").trimmed
+            out.append(c.isEmpty ? st.text.plain : c)
+        }
+        if let o = g.outroNarration, !o.trimmed.isEmpty { out.append(o) }
+        return out.filter { !$0.trimmed.isEmpty }
+    }
+
+    private var prefetchKey: String {
+        [voiceKindSetting, voiceNameSetting, voiceModeSetting, "\(voiceExprSetting)", "\(voicePaceSetting)",
+         busy == nil ? "idle" : "busy"].joined(separator: "|") + "\n" + spokenLines.joined(separator: "\n")
+    }
+
+    private func prepareVoice() async {
+        let lines = spokenLines
+        guard Narrator.effectiveKind == .pareVoice else { linesTotal = 0; return }
+        linesTotal = lines.count
+        linesReady = lines.filter { Narrator.isReady($0) }.count
+        guard busy == nil, linesReady < linesTotal else { return }
+        // Wait until typing pauses, then make the missing lines one at a time.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        let tmp = FileManager.default.temporaryDirectory
+        for line in lines where !Narrator.isReady(line) {
+            if Task.isCancelled { return }
+            _ = try? await Narrator.record(line, name: "prefetch", in: tmp)
+            if Task.isCancelled { return }
+            linesReady = lines.filter { Narrator.isReady($0) }.count
+        }
     }
 
     private func scriptRow<C: View>(badge: String, picture: Step?, @ViewBuilder content: () -> C) -> some View {
@@ -632,7 +693,7 @@ struct StepRow: View {
                 }
                 if step.image != nil {
                     StepPicture(guideID: guideID, step: step, zoom: zoom, maxWidth: 1100)
-                        .frame(maxWidth: 640, alignment: .leading)
+                        .frame(maxWidth: 520, alignment: .leading)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
                         .onTapGesture(perform: onEditPicture)
@@ -1170,5 +1231,34 @@ struct VoiceQuickPicker: View {
         }
         .padding(18)
         .frame(width: 360)
+    }
+}
+
+
+/// Caption size, position, short captions or none, for tutorial videos.
+struct CaptionsMenu: View {
+    @AppStorage("captionsOn") private var on = true
+    @AppStorage("captionSize") private var size = 1
+    @AppStorage("captionPosition") private var position = "auto"
+    @AppStorage("captionShort") private var short = false
+
+    var body: some View {
+        Menu {
+            Toggle("Show Captions", isOn: $on)
+            Divider()
+            Picker("Size", selection: $size) {
+                Text("Small").tag(0); Text("Medium").tag(1); Text("Large").tag(2)
+            }
+            Picker("Position", selection: $position) {
+                Text("Auto (moves away from the click)").tag("auto")
+                Text("Bottom").tag("bottom")
+                Text("Top").tag("top")
+            }
+            Toggle("Short Captions (one line)", isOn: $short)
+        } label: {
+            Label(on ? "Captions: \(["Small", "Medium", "Large"][min(2, max(0, size))])" : "Captions: Off",
+                  systemImage: "captions.bubble")
+        }
+        .help("Caption size and position in the video")
     }
 }

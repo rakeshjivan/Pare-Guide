@@ -42,10 +42,7 @@ enum Narrator {
         let fm = FileManager.default
         try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
         if effectiveKind == .pareVoice, let voice = PareVoice.selectedVoice {
-            let sample = VoiceLibrary.url(voice)
-            let stamp = (try? fm.attributesOfItem(atPath: sample.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            let key = hash("pv|\(voice)|\(stamp)|\(PareVoice.mode.engineName)|\(PareVoice.exaggeration)|\(PareVoice.cfg)|\(t)")
-            let cached = cacheFolder.appendingPathComponent(key + ".wav")
+            let cached = pareCacheURL(t, voice: voice)
             if let secs = duration(cached) { touch(cached); return (cached, secs) }
             let secs = try await PareVoice.say(t, voice: voice, to: cached)
             prune()
@@ -59,6 +56,21 @@ enum Narrator {
     }
 
     // MARK: Narration cache (~/Library/Caches/Pare Guide/Narration)
+
+    private static func pareCacheURL(_ t: String, voice: String) -> URL {
+        let sample = VoiceLibrary.url(voice)
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: sample.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = hash("pv|\(voice)|\(stamp)|\(PareVoice.mode.engineName)|\(PareVoice.exaggeration)|\(PareVoice.cfg)|\(t)")
+        return cacheFolder.appendingPathComponent(key + ".wav")
+    }
+
+    /// True when this line has already been made in the current Pare Voice and settings.
+    static func isReady(_ text: String) -> Bool {
+        let t = Pronunciations.apply(text.plain.trimmed)
+        guard !t.isEmpty else { return true }
+        guard effectiveKind == .pareVoice, let voice = PareVoice.selectedVoice else { return true }
+        return FileManager.default.fileExists(atPath: pareCacheURL(t, voice: voice).path)
+    }
 
     static var cacheFolder: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
