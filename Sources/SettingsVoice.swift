@@ -70,6 +70,7 @@ struct VoiceSettings: View {
                             Text("Fast is several times quicker. You can type tags like [laugh] or [sigh] in narration lines.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
+                        VoiceEngineRow()
                         HStack {
                             Button("Play a Sample") { playSample() }.disabled(working != nil || voices.isEmpty)
                             if let w = working { ProgressView().controlSize(.small); Text(w).font(.caption) }
@@ -184,8 +185,15 @@ struct VoiceSettings: View {
             defer { working = nil }
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("pare-voice-sample.wav")
             do {
-                _ = try await PareVoice.say("Here's how to shrink a large PDF with Pare. It only takes a few seconds.", voice: v, to: url)
+                let started = Date()
+                let secs = try await PareVoice.say("Here's how to shrink a large PDF with Pare. It only takes a few seconds.", voice: v, to: url)
+                let took = Date().timeIntervalSince(started)
                 play(url)
+                message = String(format: "Made %.1f s of speech in %.1f s with the %@ engine. (Play it twice: the first time also loads the model.)",
+                                 secs, took, PareVoice.activeEngine == .mlx ? "Fast (MLX)" : "Standard")
+                if let p = PareVoice.mlxProblem, PareVoice.engineSetting == .mlx {
+                    message! += "\nThe fast engine didn't work, so Standard was used: \(p.prefix(160))"
+                }
             } catch { message = error.localizedDescription }
         }
     }
@@ -454,5 +462,56 @@ struct PronunciationSection: View {
             Text("If the narrator says a word wrongly, type how it sounds — for example Pare → Pair, or GC → G C.")
         }
         .onChange(of: list) { _, now in Pronunciations.all = now }
+    }
+}
+
+
+/// Settings › Voice › Engine: Standard (PyTorch) or Fast (MLX).
+struct VoiceEngineRow: View {
+    @AppStorage("pareVoiceEngine") private var engineRaw = VoiceEngine.standard.rawValue
+    @ObservedObject private var setup = MLXSetup.shared
+    @State private var refresh = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Engine", selection: $engineRaw) {
+                ForEach(VoiceEngine.allCases) { Text($0.rawValue).tag($0.rawValue) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: engineRaw) { _, _ in
+                PareVoice.mlxProblem = nil
+                PareVoice.stop()
+                PareVoice.warmUp()
+            }
+            if engineRaw == VoiceEngine.mlx.rawValue {
+                switch setup.phase {
+                case .running(let step):
+                    HStack { ProgressView().controlSize(.small); Text(step).font(.callout); Spacer(); Button("Stop") { setup.cancel() } }
+                case .failed(let why):
+                    Text(why).font(.callout).foregroundStyle(.orange)
+                    Button("Try Again") { setup.run() }
+                default:
+                    if PareVoice.mlxInstalled {
+                        Text("Uses Apple's MLX framework, built for M-series chips. Usually faster, and may sound slightly different. If it ever fails, Pare Guide switches back to Standard by itself.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let p = PareVoice.mlxProblem {
+                            Text("The fast engine had a problem, so Standard is being used: \(p.prefix(160))")
+                                .font(.caption).foregroundStyle(.orange)
+                            Button("Try the Fast Engine Again") { PareVoice.mlxProblem = nil; PareVoice.stop(); refresh += 1 }
+                                .controlSize(.small)
+                        }
+                        Button("Repair or Update Fast Engine") { setup.run() }.controlSize(.small)
+                    } else {
+                        Text("The fast engine isn't installed yet. It installs separately (about 2 GB), so Standard keeps working either way.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Button("Install Fast Engine") { setup.run() }.buttonStyle(.borderedProminent)
+                    }
+                }
+            } else {
+                Text("The original engine. Switch to Fast (MLX) to try Apple's faster version; your voices work with both.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .id(refresh)
     }
 }

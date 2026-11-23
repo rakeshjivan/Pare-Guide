@@ -102,6 +102,93 @@ final class VoiceSetup: ObservableObject {
     func cancel() { process?.terminate() }
 }
 
+// MARK: - The fast (MLX) engine
+
+/// Installs mlx-audio in its own environment (~/pare-voice-mlx), so it can't upset the Standard engine.
+@MainActor
+final class MLXSetup: ObservableObject {
+    static let shared = MLXSetup()
+
+    enum Phase: Equatable { case idle, running(String), done, failed(String) }
+    @Published private(set) var phase: Phase = .idle
+    private var log = ""
+    private var process: Process?
+
+    var isRunning: Bool { if case .running = phase { return true } else { return false } }
+
+    private static let script = #"""
+    set -e
+    export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    UV="$HOME/.local/bin/uv"
+    VENV="$HOME/pare-voice-mlx"
+    echo "STEP Getting the installer (uv)…"
+    if [ ! -x "$UV" ]; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi
+    echo "STEP Making the fast voice environment…"
+    if [ ! -x "$VENV/bin/python" ]; then "$UV" venv --python 3.12 "$VENV"; fi
+    echo "STEP Installing MLX voice (a few minutes)…"
+    "$UV" pip install --python "$VENV/bin/python" -U mlx-audio librosa soundfile scipy
+    echo "STEP Downloading the fast voice models (once only)…"
+    "$VENV/bin/python" - <<'PY'
+    from mlx_audio.tts.utils import load_model
+    for group in (["mlx-community/chatterbox-turbo-fp16", "mlx-community/chatterbox-turbo-8bit", "mlx-community/chatterbox-turbo-4bit"],
+                  ["mlx-community/chatterbox-fp16", "mlx-community/chatterbox-8bit"]):
+        for repo in group:
+            try:
+                load_model(repo)
+                print("ready:", repo, flush=True)
+                break
+            except Exception as e:
+                print("skipped:", repo, e, flush=True)
+    PY
+    echo "STEP Done"
+    """#
+
+    func run() {
+        guard !isRunning else { return }
+        log = ""
+        phase = .running("Starting…")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", Self.script]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            guard !d.isEmpty else { return }
+            let chunk = String(decoding: d, as: UTF8.self)
+            Task { @MainActor in MLXSetup.shared.received(chunk) }
+        }
+        p.terminationHandler = { proc in
+            let code = proc.terminationStatus
+            Task { @MainActor in MLXSetup.shared.finished(code) }
+        }
+        do { try p.run(); process = p } catch { phase = .failed(error.localizedDescription) }
+    }
+
+    private func received(_ chunk: String) {
+        log = String((log + chunk).suffix(6000))
+        for line in chunk.split(separator: "\n") where line.hasPrefix("STEP ") {
+            phase = .running(String(line.dropFirst(5)))
+        }
+    }
+
+    private func finished(_ code: Int32) {
+        process?.standardOutput.flatMap { $0 as? Pipe }?.fileHandleForReading.readabilityHandler = nil
+        process = nil
+        if code == 0, PareVoice.mlxInstalled {
+            phase = .done
+            PareVoice.mlxProblem = nil
+            PareVoice.stop()
+        } else {
+            let tail = log.trimmed.split(separator: "\n").suffix(3).joined(separator: " ")
+            phase = .failed("Install stopped: \(tail.prefix(240))")
+        }
+    }
+
+    func cancel() { process?.terminate() }
+}
+
 // MARK: - The library
 
 enum VoiceLibrary {

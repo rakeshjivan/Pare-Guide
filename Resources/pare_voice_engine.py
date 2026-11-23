@@ -4,7 +4,9 @@ A tiny local web service (127.0.0.1 only) that turns text into speech with Chatt
 using the voices saved by the Pare Voice app (~/Documents/Pare Voice/Voices).
 Pare Guide starts it when it needs narration and stops it when Pare Guide quits.
 
-Runs with the Chatterbox install at ~/chatterbox (python 3.11 venv).
+Two engines, chosen by Pare Guide (Settings > Voice > Engine):
+  standard  PyTorch Chatterbox, at ~/chatterbox (python 3.11 venv)
+  mlx       Apple's MLX version (mlx-audio), at ~/pare-voice-mlx; usually faster on Apple Silicon
 Nothing leaves the Mac.
 """
 import gc
@@ -69,7 +71,73 @@ class Engine:
             return wav.shape[-1] / m.sr
 
 
-ENGINE = Engine()
+class MLXEngine:
+    """The same voices through mlx-audio, Apple's MLX framework for M-series chips."""
+
+    REPOS = {
+        "turbo": ["mlx-community/chatterbox-turbo-fp16", "mlx-community/chatterbox-turbo-8bit",
+                  "mlx-community/chatterbox-turbo-4bit"],
+        "standard": ["mlx-community/chatterbox-fp16", "mlx-community/chatterbox-8bit"],
+    }
+
+    def __init__(self):
+        self.model = None
+        self.kind = None
+        self.cond_key = None
+        self.conds = None
+        self.lock = threading.Lock()
+
+    def load(self, kind):
+        if self.model is not None and self.kind == kind:
+            return self.model
+        from mlx_audio.tts.utils import load_model
+        self.model = None
+        gc.collect()
+        last = None
+        for repo in self.REPOS.get(kind, self.REPOS["turbo"]):
+            try:
+                self.model = load_model(repo)
+                print("loaded", repo, flush=True)
+                break
+            except Exception as e:  # try the next size
+                last = e
+                print("couldn't load", repo, e, flush=True)
+        if self.model is None:
+            raise RuntimeError(f"Couldn't load the fast {kind} voice model: {last}")
+        self.kind = kind
+        self.cond_key = None
+        self.conds = None
+        return self.model
+
+    def say(self, text, ref, kind, exaggeration, cfg, out_path):
+        import numpy as np
+        from scipy.io import wavfile
+        with self.lock:
+            m = self.load(kind)
+            ex = float(exaggeration)
+            key = (kind, ref, os.path.getmtime(ref), None if kind == "turbo" else ex)
+            if key != self.cond_key:  # analyse the voice sample once, then reuse it
+                if kind == "turbo":
+                    m.prepare_conditionals(ref)
+                else:
+                    self.conds = m.prepare_conditionals(ref, 24000, ex)
+                self.cond_key = key
+            if kind == "turbo":
+                results = m.generate(text)
+            else:
+                results = m.generate(text, conds=self.conds, exaggeration=ex, cfg_weight=float(cfg), verbose=False)
+            parts, sr = [], None
+            for r in results:
+                parts.append(np.array(r.audio, dtype=np.float32).reshape(-1))
+                sr = r.sample_rate
+            sr = int(sr or getattr(m, "sample_rate", 24000))
+            wav = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
+            wavfile.write(out_path, sr, wav)
+            return len(wav) / float(sr)
+
+
+ENGINE_NAME = sys.argv[2] if len(sys.argv) > 2 else "standard"
+ENGINE = MLXEngine() if ENGINE_NAME == "mlx" else Engine()
 
 
 # ---------------------------------------------------------------- adding voices
@@ -177,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.reply(200, {"ok": True, "loaded": ENGINE.kind})
+            self.reply(200, {"ok": True, "loaded": ENGINE.kind, "engine": ENGINE_NAME})
         elif self.path == "/capabilities":
             self.reply(200, {"removeMusic": os.path.exists(SEPARATOR)})
         elif self.path == "/voices":

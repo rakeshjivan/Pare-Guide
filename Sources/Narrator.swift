@@ -23,6 +23,14 @@ enum PareVoiceMode: String, CaseIterable, Identifiable {
     var engineName: String { self == .turbo ? "turbo" : "standard" }
 }
 
+/// Which program makes the cloned voice.
+enum VoiceEngine: String, CaseIterable, Identifiable {
+    case standard = "Standard (PyTorch)"
+    case mlx = "Fast (MLX, beta)"
+    var id: String { rawValue }
+    var short: String { self == .mlx ? "mlx" : "standard" }
+}
+
 enum Narrator {
     static var kind: NarratorKind {
         get { NarratorKind(rawValue: UserDefaults.standard.string(forKey: "narratorKind") ?? "") ?? (PareVoice.isInstalled ? .pareVoice : .mac) }
@@ -60,7 +68,7 @@ enum Narrator {
     private static func pareCacheURL(_ t: String, voice: String) -> URL {
         let sample = VoiceLibrary.url(voice)
         let stamp = (try? FileManager.default.attributesOfItem(atPath: sample.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = hash("pv|\(voice)|\(stamp)|\(PareVoice.mode.engineName)|\(PareVoice.exaggeration)|\(PareVoice.cfg)|\(t)")
+        let key = hash("pv|\(PareVoice.activeEngine.short)|\(voice)|\(stamp)|\(PareVoice.mode.engineName)|\(PareVoice.exaggeration)|\(PareVoice.cfg)|\(t)")
         return cacheFolder.appendingPathComponent(key + ".wav")
     }
 
@@ -106,7 +114,7 @@ enum Narrator {
 
     static var summary: String {
         switch effectiveKind {
-        case .pareVoice: return "Pare Voice: \(PareVoice.selectedVoice ?? "")"
+        case .pareVoice: return "Pare Voice: \(PareVoice.selectedVoice ?? "")\(PareVoice.activeEngine == .mlx ? ", fast engine" : "")"
         case .mac: return "Mac voice"
         }
     }
@@ -115,17 +123,39 @@ enum Narrator {
 // MARK: - Pare Voice engine
 
 enum PareVoice {
-    static let port = 7866
     private static let lock = NSLock()
     private static var process: Process?
+    private static var processEngine: VoiceEngine?
 
     static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
-    static var python: URL { home.appendingPathComponent("chatterbox/bin/python") }
+    static var standardPython: URL { home.appendingPathComponent("chatterbox/bin/python") }
+    static var mlxPython: URL { home.appendingPathComponent("pare-voice-mlx/bin/python") }
+    static var standardInstalled: Bool { FileManager.default.isExecutableFile(atPath: standardPython.path) }
+    static var mlxInstalled: Bool { FileManager.default.isExecutableFile(atPath: mlxPython.path) }
+
+    /// The engine chosen in Settings › Voice.
+    static var engineSetting: VoiceEngine {
+        get { VoiceEngine(rawValue: UserDefaults.standard.string(forKey: "pareVoiceEngine") ?? "") ?? .standard }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "pareVoiceEngine") }
+    }
+
+    /// Set when the MLX engine failed this session; Pare Guide then uses Standard until it's reopened.
+    static var mlxProblem: String?
+
+    /// The engine that will actually run.
+    static var activeEngine: VoiceEngine {
+        if engineSetting == .mlx, mlxProblem == nil, mlxInstalled { return .mlx }
+        if standardInstalled { return .standard }
+        return mlxInstalled ? .mlx : .standard
+    }
+
+    static var port: Int { activeEngine == .mlx ? 7867 : 7866 }
+    static var python: URL { activeEngine == .mlx ? mlxPython : standardPython }
     static var voicesFolder: URL { home.appendingPathComponent("Documents/Pare Voice/Voices", isDirectory: true) }
     static var script: URL? { Bundle.main.url(forResource: "pare_voice_engine", withExtension: "py") }
 
     /// Chatterbox is installed (the same setup Pare Voice uses).
-    static var isInstalled: Bool { FileManager.default.isExecutableFile(atPath: python.path) && script != nil }
+    static var isInstalled: Bool { (standardInstalled || mlxInstalled) && script != nil }
 
     static var voices: [String] {
         let files = (try? FileManager.default.contentsOfDirectory(at: voicesFolder, includingPropertiesForKeys: nil)) ?? []
@@ -158,23 +188,26 @@ enum PareVoice {
 
     /// Starts the helper if it isn't already running.
     static func start() async throws {
-        if await healthy() { return }
+        let engine = activeEngine
+        if processEngine == engine, await healthy() { return }
+        if processEngine == nil, await healthy() { return }
+        stop()   // only one engine in memory at a time
         guard isInstalled, let script else {
             throw PGError("Pare Voice isn't set up on this Mac (Chatterbox should be at ~/chatterbox).")
         }
         let p = Process()
         p.executableURL = python
-        p.arguments = [script.path, String(port)]
+        p.arguments = [script.path, String(port), engine.short]
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
-        env["PATH"] = [home.appendingPathComponent("chatterbox/bin").path, "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        env["PATH"] = [python.deletingLastPathComponent().path, "/usr/bin", "/bin", "/usr/sbin", "/sbin",
                        env["PATH"] ?? ""].joined(separator: ":")
         p.environment = env
         let log = home.appendingPathComponent("Library/Logs/Pare Guide voice.log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
         if let h = try? FileHandle(forWritingTo: log) { p.standardOutput = h; p.standardError = h }
         try p.run()
-        lock.withLock { process = p }
+        lock.withLock { process = p; processEngine = engine }
         for _ in 0..<60 {
             try await Task.sleep(nanoseconds: 500_000_000)
             if await healthy() { return }
@@ -202,11 +235,24 @@ enum PareVoice {
         lock.withLock {
             process?.terminate()
             process = nil
+            processEngine = nil
         }
     }
 
     /// Speaks `text` in a Pare Voice voice into `url` (WAV). Returns the length in seconds.
     static func say(_ text: String, voice: String, to url: URL) async throws -> Double {
+        do {
+            return try await sayOnce(text, voice: voice, to: url)
+        } catch {
+            // If the fast engine fails, carry on with Standard for the rest of this session.
+            guard activeEngine == .mlx, standardInstalled else { throw error }
+            mlxProblem = error.localizedDescription
+            stop()
+            return try await sayOnce(text, voice: voice, to: url)
+        }
+    }
+
+    private static func sayOnce(_ text: String, voice: String, to url: URL) async throws -> Double {
         try await start()
         var req = URLRequest(url: base.appendingPathComponent("say"))
         req.httpMethod = "POST"
