@@ -490,11 +490,13 @@ struct GuideEditor: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if hasIntro {
                     scriptRow(badge: "Intro", picture: nil) {
                         NarrationField(label: nil, text: text(\.introNarration),
                                        placeholder: g.title.plain.isEmpty ? "Spoken over the intro" : g.title.plain,
                                        context: g.title.plain, full: true,
                                        beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
+                    }
                     }
                     ForEach(Array(g.steps.enumerated()), id: \.element.id) { i, step in
                         scriptRow(badge: "\(i + 1)", picture: step) {
@@ -515,11 +517,13 @@ struct GuideEditor: View {
                             }
                         }
                     }
+if hasIntro {
                     scriptRow(badge: "Outro", picture: nil) {
                         NarrationField(label: nil, text: text(\.outroNarration),
                                        placeholder: "Spoken over the closing card (optional)",
                                        context: g.title.plain, full: true,
                                        beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
+                    }
                     }
                 }
                 .padding(20)
@@ -565,6 +569,8 @@ struct GuideEditor: View {
             linesReady = lines.filter { Narrator.isReady($0) }.count
         }
     }
+
+    private var hasIntro: Bool { brands.brand(guide.wrappedValue.brandID) != nil }
 
     private func scriptRow<C: View>(badge: String, picture: Step?, @ViewBuilder content: () -> C) -> some View {
         HStack(alignment: .top, spacing: 14) {
