@@ -17,6 +17,8 @@ struct GuideEditor: View {
     @State private var aiTask: Task<Void, Never>?
     /// 0 Steps, 1 Grid, 2 Script.
     @AppStorage("editorLayout") private var layout = 0
+    /// Script edits also change the step text, so Steps and Grid stay the same as the script.
+    @AppStorage("scriptUpdatesSteps") private var scriptUpdatesSteps = true
     @AppStorage("narratorKind") private var voiceKindSetting = ""
     @AppStorage("pareVoiceName") private var voiceNameSetting = ""
     @AppStorage("pareVoiceMode") private var voiceModeSetting = ""
@@ -459,6 +461,9 @@ struct GuideEditor: View {
                 }
                 .labelsHidden()
                 .fixedSize()
+                Toggle("Edits update the steps", isOn: $scriptUpdatesSteps)
+                    .toggleStyle(.checkbox)
+                    .help("On: changing a line here also changes that step's text in Steps and Grid. Off: the narrator can say something different from the written step.")
                 Spacer()
                 Button { export(.tutorial, narrate: true) } label: {
                     Label("Make Video", systemImage: "film")
@@ -506,12 +511,23 @@ struct GuideEditor: View {
                                     Text("Step: " + step.text.plain)
                                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 } else {
-                                    Text("Same as the step text — click to edit what's said")
+                                    Text(scriptUpdatesSteps ? "Click to edit — changes the step text too" : "Same as the step text — click to edit what's said")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 NarrationField(label: nil,
                                                text: Binding(get: { stepBinding(step.id).wrappedValue.narration ?? "" },
-                                                             set: { v in stepBinding(step.id).wrappedValue.narration = v.isEmpty ? nil : v }),
+                                                             set: { v in
+                                                                 let b = stepBinding(step.id)
+                                                                 if scriptUpdatesSteps, !v.trimmed.isEmpty {
+                                                                     // Keep one wording everywhere: the step text becomes the script line.
+                                                                     var st = b.wrappedValue
+                                                                     st.text = Self.rebold(old: st.text, new: v)
+                                                                     st.narration = nil
+                                                                     b.wrappedValue = st
+                                                                 } else {
+                                                                     b.wrappedValue.narration = v.isEmpty ? nil : v
+                                                                 }
+                                                             }),
                                                placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
                                                context: g.title.plain, full: true,
                                                linkedDefault: !step.text.plain.isEmpty,
@@ -596,6 +612,17 @@ if hasIntro {
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// Puts **bold** back around on-screen labels that are still in the new wording.
+    static func rebold(old: String, new: String) -> String {
+        var out = new
+        for part in old.boldParts where part.bold {
+            let label = part.text.trimmed
+            guard !label.isEmpty, !out.contains("**\(label)**"), let r = out.range(of: label) else { continue }
+            out.replaceSubrange(r, with: "**\(label)**")
+        }
+        return out
     }
 
     static func duration(_ s: Double) -> String {
