@@ -59,13 +59,25 @@ struct VoiceSettings: View {
                         .pickerStyle(.segmented)
                         if modeRaw == PareVoiceMode.standard.rawValue {
                             LabeledContent("Expressiveness") {
-                                Slider(value: $expressiveness, in: 0.25...1.0) { EmptyView() }
+                                HStack(spacing: 8) {
+                                    Text("Calm").font(.caption).foregroundStyle(.secondary)
+                                    Slider(value: $expressiveness, in: 0.25...1.0) { EmptyView() }
+                                    Text("Lively").font(.caption).foregroundStyle(.secondary)
+                                }
                             }
-                            LabeledContent("Pace and steadiness") {
-                                Slider(value: $pace, in: 0.0...0.8) { EmptyView() }
+                            LabeledContent("Pace") {
+                                HStack(spacing: 8) {
+                                    Text("Slower").font(.caption).foregroundStyle(.secondary)
+                                    Slider(value: $pace, in: 0.0...0.8) { EmptyView() }
+                                    Text("Quicker").font(.caption).foregroundStyle(.secondary)
+                                }
                             }
-                            Text("Lower expressiveness is calmer; lower pace is slower and more deliberate (0 is fastest to make).")
-                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Text("More lively tends to speak faster, so if lines rush, move Pace towards Slower. All the way to Slower is also quickest to make.")
+                                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                Spacer()
+                                Button("Reset") { expressiveness = 0.45; pace = 0.5 }.controlSize(.small)
+                            }
                         } else {
                             Text("Fast is several times quicker. You can type tags like [laugh] or [sigh] in narration lines.")
                                 .font(.caption).foregroundStyle(.secondary)
