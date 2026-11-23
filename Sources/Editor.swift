@@ -495,6 +495,7 @@ struct GuideEditor: View {
                         NarrationField(label: nil, text: text(\.introNarration),
                                        placeholder: g.title.plain.isEmpty ? "Spoken over the intro" : g.title.plain,
                                        context: g.title.plain, full: true,
+                                       linkedDefault: !g.title.plain.isEmpty,
                                        beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
                     }
                     }
@@ -505,7 +506,7 @@ struct GuideEditor: View {
                                     Text("Step: " + step.text.plain)
                                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 } else {
-                                    Text("Reading the step text — type to change what's said")
+                                    Text("Same as the step text — click to edit what's said")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 NarrationField(label: nil,
@@ -513,6 +514,7 @@ struct GuideEditor: View {
                                                              set: { v in stepBinding(step.id).wrappedValue.narration = v.isEmpty ? nil : v }),
                                                placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
                                                context: g.title.plain, full: true,
+                                               linkedDefault: !step.text.plain.isEmpty,
                                        beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
                             }
                         }
@@ -691,7 +693,8 @@ struct StepRow: View {
                     NarrationField(label: nil,
                                    text: Binding(get: { step.narration ?? "" },
                                                  set: { step.narration = $0.isEmpty ? nil : $0 }),
-                                   placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain)
+                                   placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
+                                   linkedDefault: !step.text.plain.isEmpty)
                 }
                 if !step.appName.isEmpty {
                     Text([step.appName, step.windowTitle].filter { !$0.isEmpty }.joined(separator: " — "))
@@ -965,9 +968,15 @@ struct NarrationField: View {
     let placeholder: String
     var context: String = ""
     var full = false
+    /// The placeholder is the real default line (the step text). When set, it's shown as ordinary,
+    /// editable text: you can click into it, select part of it, copy and paste. Until you change it,
+    /// the line stays linked to the step text.
+    var linkedDefault = false
     /// Called just before a rewrite replaces the line, so Undo can bring it back.
     var beforeRewrite: () -> Void = {}
     @ObservedObject private var player = NarrationPlayer.shared
+    @State private var draft = ""
+    @FocusState private var focused: Bool
     @State private var rewriting = false
     @State private var problem: String?
 
@@ -975,17 +984,42 @@ struct NarrationField: View {
     private var seconds: Double { Narrator.estimate(spoken) }
 
     var body: some View {
-        if full { big } else { compact }
+        Group { if full { big } else { compact } }
+            .onAppear { if linkedDefault { draft = text.isEmpty ? placeholder : text } }
+            .onChange(of: draft) { _, v in
+                guard linkedDefault else { return }
+                let new = stored(from: v)
+                if new != text { text = new }
+            }
+            .onChange(of: text) { _, v in
+                // Changed from outside (Rewrite, Undo, Write with AI): show it.
+                guard linkedDefault, stored(from: draft) != v else { return }
+                draft = v.isEmpty ? placeholder : v
+            }
+            .onChange(of: placeholder) { _, p in
+                if linkedDefault, text.isEmpty, !focused { draft = p }
+            }
+            .onChange(of: focused) { _, now in
+                if linkedDefault, !now, draft.trimmed.isEmpty { draft = placeholder }
+            }
     }
+
+    /// What gets saved: nothing while the line still matches the step text.
+    private func stored(from d: String) -> String {
+        d.trimmed == placeholder.trimmed ? "" : d
+    }
+
+    private var field: Binding<String> { linkedDefault ? $draft : $text }
 
     private var compact: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "waveform").foregroundStyle(Color(cgColor: Renderer.accent)).font(.caption)
             if let label { Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 40, alignment: .leading) }
-            TextField(placeholder, text: $text, axis: .vertical)
+            TextField(placeholder, text: field, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .focused($focused)
             playButton(small: true)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -995,10 +1029,11 @@ struct NarrationField: View {
 
     private var big: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField(placeholder, text: $text, axis: .vertical)
+            TextField(placeholder, text: field, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
                 .lineLimit(2...6)
+                .focused($focused)
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
