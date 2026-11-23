@@ -52,7 +52,17 @@ enum Narrator {
         if effectiveKind == .pareVoice, let voice = PareVoice.selectedVoice {
             let cached = pareCacheURL(t, voice: voice)
             if let secs = duration(cached) { touch(cached); return (cached, secs) }
-            let secs = try await PareVoice.say(t, voice: voice, to: cached)
+            // If this line is already being made (by the background preparation or another export),
+            // wait for that instead of making it twice. Each line is written to a temporary file and
+            // moved into place when complete, so nothing ever reads a half-written line.
+            let secs = try await NarrationJobs.shared.run(key: cached.path) {
+                let tmp = cached.deletingLastPathComponent().appendingPathComponent(".making-\(UUID().uuidString).wav")
+                defer { try? FileManager.default.removeItem(at: tmp) }
+                let secs = try await PareVoice.say(t, voice: voice, to: tmp)
+                try? FileManager.default.removeItem(at: cached)
+                try FileManager.default.moveItem(at: tmp, to: cached)
+                return secs
+            }
             prune()
             return (cached, secs)
         }
@@ -268,6 +278,24 @@ enum PareVoice {
             throw PGError("Pare Voice: \((json?["error"] as? String) ?? "no answer")")
         }
         return secs
+    }
+}
+
+// MARK: - One job per line
+
+/// Makes sure each narration line is only made once at a time, even when the background
+/// preparation and Make Video ask for it together.
+actor NarrationJobs {
+    static let shared = NarrationJobs()
+    private var running: [String: Task<Double, Error>] = [:]
+
+    func run(key: String, _ make: @escaping @Sendable () async throws -> Double) async throws -> Double {
+        if let job = running[key] { return try await job.value }
+        // A separate task, so the line still finishes (and is kept) if whoever asked first stops waiting.
+        let job = Task { try await make() }
+        running[key] = job
+        defer { running[key] = nil }
+        return try await job.value
     }
 }
 
