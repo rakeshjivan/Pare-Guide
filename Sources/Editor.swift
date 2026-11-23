@@ -18,6 +18,10 @@ struct GuideEditor: View {
     @AppStorage("showNarration") private var showNarration = true
     /// 0 Steps, 1 Grid, 2 Script.
     @AppStorage("editorLayout") private var layout = 0
+    @AppStorage("captionsOn") private var captionsOn = true
+    @AppStorage("captionSize") private var captionSize = 1
+    @AppStorage("captionPosition") private var captionPosition = "auto"
+    @AppStorage("captionShort") private var captionShort = false
     @State private var picked = Set<UUID>()
     @State private var lastPicked: Int?
     /// Earlier states of this guide, newest last, for the Undo button.
@@ -305,6 +309,19 @@ struct GuideEditor: View {
 
             Menu {
                 Button("Tutorial Video (.mp4)") { export(.tutorial, narrate: true) }
+                Menu("Captions") {
+                    Toggle("Show Captions", isOn: $captionsOn)
+                    Divider()
+                    Picker("Size", selection: $captionSize) {
+                        Text("Small").tag(0); Text("Medium").tag(1); Text("Large").tag(2)
+                    }
+                    Picker("Position", selection: $captionPosition) {
+                        Text("Auto (moves away from the click)").tag("auto")
+                        Text("Bottom").tag("bottom")
+                        Text("Top").tag("top")
+                    }
+                    Toggle("Short Captions (one line)", isOn: $captionShort)
+                }
                 Divider()
                 ForEach(ExportFormat.allCases.filter { $0 != .tutorial }) { f in
                     Button(f.rawValue) { export(f, narrate: false) }

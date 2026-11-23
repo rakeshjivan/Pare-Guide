@@ -377,7 +377,13 @@ enum TutorialVideo {
             cursor(ctx, at: sp, pressed: shot.clickTimes.contains { t >= $0 && t < $0 + 0.12 })
         }
 
-        caption(ctx, number: st.number, text: st.text, alpha: seg(t, 0.2, 0.55), look: look)
+        // Where the click lands once the camera has settled, so Auto can keep the caption off it.
+        var clickY: CGFloat?
+        if let to = st.to {
+            let kz = W / st.zoom.width
+            clickY = H - (to.y - st.zoom.minY) * kz
+        }
+        caption(ctx, number: st.number, text: st.text, alpha: seg(t, 0.2, 0.55), look: look, clickY: clickY)
     }
 
     // MARK: Pieces
@@ -417,27 +423,38 @@ enum TutorialVideo {
               rect: CGRect(x: c.x - r, y: c.y - r * 0.62, width: r * 2, height: r * 1.3), align: .center)
     }
 
-    private static func caption(_ ctx: CGContext, number: Int, text: String, alpha: CGFloat, look: Look) {
-        guard alpha > 0 else { return }
+    private static func caption(_ ctx: CGContext, number: Int, text: String, alpha: CGFloat, look: Look, clickY: CGFloat? = nil) {
+        let style = CaptionStyle.current
+        guard style.on, alpha > 0 else { return }
+        let shown = style.short ? CaptionStyle.shorten(text) : text
+        let (fontSize, r, maxW): (CGFloat, CGFloat, CGFloat) =
+            style.size == 0 ? (26, 17, 1100) : style.size == 2 ? (38, 24, 1480) : (32, 21, 1300)
         let str = NSMutableAttributedString()
-        for part in text.boldParts {
+        for part in shown.boldParts {
             str.append(NSAttributedString(string: part.text, attributes: [
-                .font: NSFont.systemFont(ofSize: 38, weight: part.bold ? .bold : .medium),
+                .font: NSFont.systemFont(ofSize: fontSize, weight: part.bold ? .bold : .medium),
                 .foregroundColor: NSColor.white]))
         }
-        let maxW: CGFloat = 1480
-        let b = str.boundingRect(with: CGSize(width: maxW, height: 200), options: [.usesLineFragmentOrigin])
-        let tw = min(maxW, ceil(b.width)), th = min(110, ceil(b.height))
-        let pw = tw + 72 + 70, ph = max(84, th + 36)
+        let oneLine = ceil(fontSize * 1.25)
+        let b = str.boundingRect(with: CGSize(width: maxW, height: 400), options: [.usesLineFragmentOrigin])
+        let tw = min(maxW, ceil(b.width))
+        let th = style.short ? oneLine : min(oneLine * 2, ceil(b.height))
+        let padX = r * 1.5, gap = r * 2.9
+        let pw = tw + padX + gap + padX, ph = max(r * 3.4, th + fontSize * 0.95)
+        let margin: CGFloat = style.size == 0 ? 36 : 48
+        // Auto: go to the top when the click would be under (or just above) the caption.
+        var top = style.position == "top"
+        if style.position == "auto", let y = clickY, y < margin + ph + 90 { top = true }
         let rise = (1 - alpha) * 18
-        let pill = CGRect(x: (W - pw) / 2, y: 54 - rise, width: pw, height: ph)
+        let y = top ? H - margin - ph + rise : margin - rise
+        let pill = CGRect(x: (W - pw) / 2, y: y, width: pw, height: ph)
         ctx.saveGState()
         ctx.setAlpha(alpha)
-        ctx.setFillColor(look.text.withAlphaComponent(0.93).cgColor)
+        ctx.setFillColor(look.text.withAlphaComponent(0.9).cgColor)
         ctx.addPath(CGPath(roundedRect: pill, cornerWidth: min(42, ph / 2), cornerHeight: min(42, ph / 2), transform: nil))
         ctx.fillPath()
-        badge(ctx, number, center: CGPoint(x: pill.minX + 36 + 22, y: pill.midY), radius: 24, look: look)
-        withNS(ctx) { str.draw(with: CGRect(x: pill.minX + 36 + 70, y: pill.midY - th / 2, width: tw, height: th),
+        badge(ctx, number, center: CGPoint(x: pill.minX + padX + r, y: pill.midY), radius: r, look: look)
+        withNS(ctx) { str.draw(with: CGRect(x: pill.minX + padX + gap, y: pill.midY - th / 2, width: tw, height: th),
                                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine]) }
         ctx.restoreGState()
     }
@@ -634,5 +651,43 @@ final class ClipReader {
             if nextSample == nil { done = true }
         }
         return current
+    }
+}
+
+
+/// How step captions look in tutorial videos (chosen in Export › Captions).
+struct CaptionStyle {
+    var on = true
+    var size = 1            // 0 Small, 1 Medium, 2 Large
+    var position = "auto"   // auto, bottom, top
+    var short = false
+
+    static var current: CaptionStyle {
+        let d = UserDefaults.standard
+        var c = CaptionStyle()
+        if d.object(forKey: "captionsOn") != nil { c.on = d.bool(forKey: "captionsOn") }
+        if d.object(forKey: "captionSize") != nil { c.size = d.integer(forKey: "captionSize") }
+        c.position = d.string(forKey: "captionPosition") ?? "auto"
+        c.short = d.bool(forKey: "captionShort")
+        return c
+    }
+
+    /// "Next choose a level, then click **Compress PDF**" → "Click **Compress PDF**".
+    static func shorten(_ text: String) -> String {
+        let t = text.trimmed
+        var parts: [String] = [t]
+        for sep in [". ", "; ", ", ", " and then ", " then ", " and "] {
+            parts = parts.flatMap { $0.components(separatedBy: sep) }
+        }
+        parts = parts.map { $0.trimmed }.filter { !$0.isEmpty }
+        // Don't split inside a **bold** name like "**Save and Close**".
+        guard parts.count > 1, !parts.contains(where: { $0.components(separatedBy: "**").count % 2 == 0 }) else { return t }
+        var pick = parts.last(where: { $0.contains("**") }) ?? parts[0]
+        for lead in ["and ", "then ", "next ", "now ", "finally "] {
+            while pick.lowercased().hasPrefix(lead) { pick = String(pick.dropFirst(lead.count)).trimmed }
+        }
+        if pick.hasSuffix(".") { pick.removeLast() }
+        guard let f = pick.first else { return t }
+        return f.uppercased() + pick.dropFirst()
     }
 }
