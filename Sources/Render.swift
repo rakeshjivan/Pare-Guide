@@ -69,7 +69,7 @@ enum Renderer {
         guard var out = ctx.makeImage() else { return nil }
 
         // 3. Crop, or zoom in around the click.
-        if let c = step.crop ?? autoZoom(step, zoom: zoom, size: CGSize(width: W, height: H)) {
+        if let c = step.crop ?? autoZoom(step, zoom: step.zoomOverride ?? zoom, size: CGSize(width: W, height: H)) {
             let r = c.integral.intersection(full)
             if !r.isNull, r.width > 10, r.height > 10, let cropped = out.cropping(to: r) { out = cropped }
         }

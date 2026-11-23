@@ -26,6 +26,8 @@ struct Step: Codable, Identifiable, Equatable {
     var showHighlight = true
     var blurs: [CGRect] = []
     var crop: CGRect?
+    /// This step's own zoom; nil follows the guide's setting.
+    var zoomOverride: Zoom? = nil
     var autoBlurDone = false
     // What was clicked, for step wording and AI.
     var appName = ""

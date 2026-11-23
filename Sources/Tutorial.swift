@@ -186,6 +186,7 @@ enum TutorialVideo {
             var clean = step
             clean.showHighlight = false
             clean.crop = nil
+            clean.zoomOverride = nil
             guard let img = Renderer.render(clean, base: base, zoom: .off, maxWidth: 2880) else { continue }
             let f = CGFloat(img.width) / CGFloat(base.width)
             let size = CGSize(width: img.width, height: img.height)
@@ -193,7 +194,7 @@ enum TutorialVideo {
 
             let full = fit16x9(around: CGRect(origin: .zero, size: size))
             var zoomRect = full
-            let z: Zoom = guide.zoom == .off ? .off : guide.zoom
+            let z: Zoom = step.zoomOverride ?? guide.zoom
             if let c = step.crop { zoomRect = fit16x9(around: sc(c), within: size) }
             else if let r = Renderer.autoZoom(step, zoom: z, size: CGSize(width: base.width, height: base.height)) {
                 zoomRect = fit16x9(around: sc(r), within: size)

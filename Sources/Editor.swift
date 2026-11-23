@@ -123,7 +123,16 @@ struct GuideEditor: View {
                         StepTile(guideID: guideID, step: step, number: i + 1, zoom: guide.wrappedValue.zoom,
                                  selected: picked.contains(step.id))
                             .onTapGesture { pick(i, steps) }
+                            .overlay(alignment: .topTrailing) {
+                                if step.image != nil {
+                                    StepZoomMenu(step: stepBinding(step.id), guideZoom: guide.wrappedValue.zoom).padding(6)
+                                }
+                            }
                             .contextMenu {
+                                Picker("Zoom This Picture", selection: stepBinding(step.id).zoomOverride) {
+                                    Text("Same as guide").tag(Zoom?.none)
+                                    ForEach(Zoom.allCases) { Text($0.rawValue).tag(Zoom?.some($0)) }
+                                }
                                 Button("Delete Step", role: .destructive) { picked = [step.id]; deletePicked() }
                             }
                     }
@@ -235,13 +244,13 @@ struct GuideEditor: View {
                 .foregroundStyle(.secondary)
             if layout != 2 {
                 HStack {
-                    Picker("Pictures", selection: guide.zoom) {
+                    Picker("All pictures", selection: guide.zoom) {
                         ForEach(Zoom.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 420)
                     Spacer()
-                    Text("\(guide.wrappedValue.steps.count) steps · click text to edit · drag to reorder")
+                    Text("\(guide.wrappedValue.steps.count) steps · change one picture with its 🔍 button")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -531,7 +540,8 @@ struct GuideEditor: View {
                                                placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
                                                context: g.title.plain, full: true,
                                                linkedDefault: !step.text.plain.isEmpty,
-                                       beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
+                                       beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" },
+                                       onDelete: { delete(step.id) })
                             }
                         }
                     }
@@ -730,6 +740,7 @@ struct StepRow: View {
                 if step.image != nil {
                     StepPicture(guideID: guideID, step: step, zoom: zoom, maxWidth: 1100)
                         .frame(maxWidth: 520, alignment: .leading)
+                        .overlay(alignment: .topTrailing) { StepZoomMenu(step: $step, guideZoom: zoom).padding(6) }
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
                         .onTapGesture(perform: onEditPicture)
@@ -772,7 +783,7 @@ struct StepPicture: View {
     }
 
     private static func key(_ g: UUID, _ step: Step, _ zoom: Zoom, _ w: Int) -> String {
-        "\(g)|\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)|\(w)"
+        "\(g)|\(step.image ?? "")|\(step.blurs)|\(String(describing: step.crop))|\(String(describing: step.highlight))|\(step.showHighlight)|\(zoom.rawValue)|\(step.zoomOverride?.rawValue ?? "-")|\(w)"
     }
     private var key: String { Self.key(guideID, step, zoom, maxWidth) }
 
@@ -896,6 +907,12 @@ struct StepPictureEditor: View {
             .padding(.horizontal, 12)
 
             HStack {
+                Picker("Zoom", selection: $draft.zoomOverride) {
+                    Text("Same as guide").tag(Zoom?.none)
+                    ForEach(Zoom.allCases) { Text($0.rawValue).tag(Zoom?.some($0)) }
+                }
+                .fixedSize()
+                .help("Zoom for this picture only")
                 Toggle("Show highlight", isOn: $draft.showHighlight)
                 Button("Remove all blurs") { draft.blurs = [] }.disabled(draft.blurs.isEmpty)
                 Button("Find private details") { detect() }.disabled(detecting)
@@ -919,6 +936,7 @@ struct StepPictureEditor: View {
         let url = GuideStore.shared.imageURL(guideID, name)
         var s = draft
         s.crop = nil
+        s.zoomOverride = nil
         let st = s
         let result = await Task.detached(priority: .userInitiated) { () -> (CGImage, CGSize)? in
             guard let base = GuideStore.loadImage(url),
@@ -1001,6 +1019,8 @@ struct NarrationField: View {
     var linkedDefault = false
     /// Called just before a rewrite replaces the line, so Undo can bring it back.
     var beforeRewrite: () -> Void = {}
+    /// When set, a bin button next to Rewrite deletes the step.
+    var onDelete: (() -> Void)? = nil
     @ObservedObject private var player = NarrationPlayer.shared
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -1076,6 +1096,12 @@ struct NarrationField: View {
                     .fixedSize()
                     .disabled(rewriting || spoken.trimmed.isEmpty)
                     .help("Ask the AI to rewrite this line")
+                if let onDelete {
+                    Button(action: onDelete) { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Delete this step (Undo brings it back)")
+                }
                 if rewriting { ProgressView().controlSize(.small); Text("Rewriting…").font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 if seconds > 0 {
@@ -1139,6 +1165,30 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
+
+/// Per-picture zoom: whole screen, a little, close, or the guide's setting.
+struct StepZoomMenu: View {
+    @Binding var step: Step
+    let guideZoom: Zoom
+
+    var body: some View {
+        Menu {
+            Picker("Zoom", selection: $step.zoomOverride) {
+                Text("Same as guide (\(guideZoom.rawValue.lowercased()))").tag(Zoom?.none)
+                ForEach(Zoom.allCases) { Text($0.rawValue).tag(Zoom?.some($0)) }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: step.zoomOverride == nil ? "plus.magnifyingglass" : "plus.magnifyingglass.fill")
+                .padding(5)
+                .background(Circle().fill(.regularMaterial))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(step.zoomOverride == nil ? "Zoom this picture only" : "This picture: \(step.zoomOverride!.rawValue.lowercased())")
+    }
+}
 
 /// One step as a thumbnail in the grid.
 struct StepTile: View {
