@@ -453,7 +453,8 @@ struct GuideEditor: View {
                     scriptRow(badge: "Intro", picture: nil) {
                         NarrationField(label: nil, text: text(\.introNarration),
                                        placeholder: g.title.plain.isEmpty ? "Spoken over the intro" : g.title.plain,
-                                       context: g.title.plain, full: true)
+                                       context: g.title.plain, full: true,
+                                       beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
                     }
                     ForEach(Array(g.steps.enumerated()), id: \.element.id) { i, step in
                         scriptRow(badge: "\(i + 1)", picture: step) {
@@ -464,14 +465,16 @@ struct GuideEditor: View {
                                                text: Binding(get: { stepBinding(step.id).wrappedValue.narration ?? "" },
                                                              set: { v in stepBinding(step.id).wrappedValue.narration = v.isEmpty ? nil : v }),
                                                placeholder: step.text.plain.isEmpty ? "What the narrator says" : step.text.plain,
-                                               context: g.title.plain, full: true)
+                                               context: g.title.plain, full: true,
+                                       beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
                             }
                         }
                     }
                     scriptRow(badge: "Outro", picture: nil) {
                         NarrationField(label: nil, text: text(\.outroNarration),
                                        placeholder: "Spoken over the closing card (optional)",
-                                       context: g.title.plain, full: true)
+                                       context: g.title.plain, full: true,
+                                       beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" })
                     }
                 }
                 .padding(20)
@@ -856,6 +859,8 @@ struct NarrationField: View {
     let placeholder: String
     var context: String = ""
     var full = false
+    /// Called just before a rewrite replaces the line, so Undo can bring it back.
+    var beforeRewrite: () -> Void = {}
     @ObservedObject private var player = NarrationPlayer.shared
     @State private var rewriting = false
     @State private var problem: String?
@@ -949,7 +954,11 @@ struct NarrationField: View {
         let line = spoken
         Task {
             defer { rewriting = false }
-            do { text = try await AI.rewriteLine(line, how: how, title: context) }
+            do {
+                let new = try await AI.rewriteLine(line, how: how, title: context)
+                beforeRewrite()
+                text = new
+            }
             catch { problem = error.localizedDescription }
         }
     }
