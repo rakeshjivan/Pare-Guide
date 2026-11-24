@@ -114,6 +114,11 @@ struct GuideEditor: View {
                 Button(picked.count == steps.count && !steps.isEmpty ? "Select None" : "Select All") {
                     picked = picked.count == steps.count ? [] : Set(steps.map(\.id))
                 }
+                Button { duplicatePicked() } label: {
+                    Label(picked.count > 1 ? "Duplicate \(picked.count) Steps" : "Duplicate", systemImage: "plus.square.on.square")
+                }
+                .keyboardShortcut("d", modifiers: .command)
+                .disabled(picked.isEmpty)
                 Button(role: .destructive) { deletePicked() } label: {
                     Label(picked.count > 1 ? "Delete \(picked.count) Steps" : "Delete Step", systemImage: "trash")
                 }
@@ -137,6 +142,7 @@ struct GuideEditor: View {
                                     Text("Same as guide").tag(Zoom?.none)
                                     ForEach(Zoom.allCases) { Text($0.rawValue).tag(Zoom?.some($0)) }
                                 }
+                                Button("Duplicate Step") { duplicate(step.id) }
                                 Button("Delete Step", role: .destructive) { picked = [step.id]; deletePicked() }
                             }
                     }
@@ -194,7 +200,8 @@ struct GuideEditor: View {
                             showNarration: false,
                             onEditPicture: { editing = StepRef(id: step.id) },
                             onDelete: { delete(step.id) },
-                            onAI: { writeWithAI(only: step.id) })
+                            onAI: { writeWithAI(only: step.id) },
+                            onDuplicate: { duplicate(step.id) })
                         .listRowSeparator(.hidden)
                         .padding(.vertical, 6)
                 }
@@ -345,6 +352,43 @@ struct GuideEditor: View {
     }
 
     // MARK: Actions
+
+    /// Copies a step (picture, drawings, blurs, crop, zoom, wording and narration) and puts the copy right after it.
+    private func duplicate(_ id: UUID) {
+        var g = guide.wrappedValue
+        guard let i = g.steps.firstIndex(where: { $0.id == id }) else { return }
+        remember("duplicate step")
+        undoNote = "Duplicated step \(i + 1)"
+        var copy = g.steps[i]
+        copy.id = UUID()
+        copy.time = Date()
+        copy.annotations = copy.annotations?.map { var m = $0; m.id = UUID(); return m }
+        g.steps.insert(copy, at: i + 1)
+        store.update(g, forceSnapshot: true)
+        picked = [copy.id]
+    }
+
+    /// Duplicates every selected step, each copy right after its original (⌘D in Grid).
+    private func duplicatePicked() {
+        var g = guide.wrappedValue
+        let ids = g.steps.map(\.id).filter { picked.contains($0) }
+        guard !ids.isEmpty else { return }
+        if ids.count == 1 { duplicate(ids[0]); return }
+        remember("duplicate steps")
+        undoNote = "Duplicated \(ids.count) steps"
+        var copies = Set<UUID>()
+        for id in ids.reversed() {
+            guard let i = g.steps.firstIndex(where: { $0.id == id }) else { continue }
+            var copy = g.steps[i]
+            copy.id = UUID()
+            copy.time = Date()
+            copy.annotations = copy.annotations?.map { var m = $0; m.id = UUID(); return m }
+            g.steps.insert(copy, at: i + 1)
+            copies.insert(copy.id)
+        }
+        store.update(g, forceSnapshot: true)
+        picked = copies
+    }
 
     private func delete(_ id: UUID) {
         remember("delete step")
@@ -548,7 +592,8 @@ struct GuideEditor: View {
                                                context: g.title.plain, full: true,
                                                linkedDefault: !step.text.plain.isEmpty,
                                        beforeRewrite: { remember("rewrite"); undoNote = "Line rewritten" },
-                                       onDelete: { delete(step.id) })
+                                       onDelete: { delete(step.id) },
+                                       onDuplicate: { duplicate(step.id) })
                             }
                         }
                     }
@@ -687,6 +732,7 @@ struct StepRow: View {
     let onEditPicture: () -> Void
     let onDelete: () -> Void
     let onAI: () -> Void
+    var onDuplicate: (() -> Void)? = nil
     @State private var hovering = false
     @State private var isEditing = false
     @FocusState private var focused: Bool
@@ -759,6 +805,9 @@ struct StepRow: View {
                 if step.image != nil {
                     Button(action: onEditPicture) { Image(systemName: "crop") }.help("Edit picture")
                     Button(action: onAI) { Image(systemName: "sparkles") }.help("Write this step with AI")
+                }
+                if let onDuplicate {
+                    Button(action: onDuplicate) { Image(systemName: "plus.square.on.square") }.help("Duplicate step")
                 }
                 Button(action: onDelete) { Image(systemName: "trash") }.help("Delete step")
             }
@@ -1231,6 +1280,8 @@ struct NarrationField: View {
     var beforeRewrite: () -> Void = {}
     /// When set, a bin button next to Rewrite deletes the step.
     var onDelete: (() -> Void)? = nil
+    /// When set, a copy button next to the bin duplicates the step.
+    var onDuplicate: (() -> Void)? = nil
     @ObservedObject private var player = NarrationPlayer.shared
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -1306,6 +1357,12 @@ struct NarrationField: View {
                     .fixedSize()
                     .disabled(rewriting || spoken.trimmed.isEmpty)
                     .help("Ask the AI to rewrite this line")
+                if let onDuplicate {
+                    Button(action: onDuplicate) { Image(systemName: "plus.square.on.square") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Duplicate this step")
+                }
                 if let onDelete {
                     Button(action: onDelete) { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
