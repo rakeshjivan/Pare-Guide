@@ -4,6 +4,7 @@
 // callouts and so on in Camtasia. A captions file (.srt) is saved beside it for File › Import › Captions.
 
 import Foundation
+import AppKit
 import AVFoundation
 
 enum CamtasiaExport {
@@ -183,6 +184,43 @@ enum CamtasiaExport {
             }
             at += dur
             seconds += Double(frames) / Double(TutorialVideo.fps)
+        }
+
+        // The original full-screen screenshots, in the media bin only (not on the timeline), so you can
+        // build your own shots in Camtasia. Blurs are kept so private details stay hidden; the highlight
+        // box, drawings, crop and zoom are left off.
+        progress("Adding the screenshots to the media bin…")
+        let shotJobs: [(Int, Step, URL)] = await MainActor.run {
+            guide.steps.enumerated().compactMap { i, st in
+                st.image.map { (i + 1, st, GuideStore.shared.imageURL(guide.id, $0)) }
+            }
+        }
+        for (n, st, imgURL) in shotJobs {
+            let png: Data? = await Task.detached(priority: .userInitiated) {
+                guard let base = GuideStore.loadImage(imgURL) else { return nil }
+                var clean = st
+                clean.showHighlight = false
+                clean.annotations = nil
+                clean.crop = nil
+                clean.zoomOverride = .off
+                return Renderer.render(clean, base: base, zoom: .off).flatMap(Renderer.png)
+            }.value
+            guard let png, let img = NSBitmapImageRep(data: png) else { continue }
+            let name = String(format: "Screenshot %02d.png", n)
+            let tmp = work.appendingPathComponent(name)
+            try png.write(to: tmp)
+            let src = try addFile(tmp, name: name)
+            let id = newID()
+            let w = img.pixelsWide, h = img.pixelsHigh
+            sourceBin.append([
+                "id": id, "src": src, "rect": [0, 0, w, h], "lastMod": stamp, "loudnessNormalization": true,
+                "sourceTracks": [[
+                    "range": [0, 1], "type": 1, "editRate": 600, "trackRect": [0, 0, w, h],
+                    "sampleRate": 600, "bitDepth": 0, "numChannels": 0, "integratedLUFS": 100.0,
+                    "peakLevel": -1.0, "tag": 0, "metaData": "\(name);", "parameters": [String: Any](),
+                ]],
+                "metadata": ["timeAdded": stamp],
+            ])
         }
 
         func attributes() -> [String: Any] {
