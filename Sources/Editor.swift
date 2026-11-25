@@ -338,9 +338,10 @@ struct GuideEditor: View {
 
             Menu {
                 Button("Tutorial Video (.mp4)") { export(.tutorial, narrate: true) }
+                Button("Camtasia Project (to edit, with narration)") { export(.camtasia, narrate: true) }
                 CaptionsMenu()
                 Divider()
-                ForEach(ExportFormat.allCases.filter { $0 != .tutorial }) { f in
+                ForEach(ExportFormat.allCases.filter { $0 != .tutorial && $0 != .camtasia }) { f in
                     Button(f.rawValue) { export(f, narrate: false) }
                     if f == .mp4 { Button("Simple slideshow with Mac narration (.mp4)") { export(.mp4, narrate: true) } }
                 }
@@ -525,6 +526,12 @@ struct GuideEditor: View {
                     .toggleStyle(.checkbox)
                     .help("On: changing a line here also changes that step's text in Steps and Grid. Off: the narrator can say something different from the written step.")
                 Spacer()
+                Button { export(.camtasia, narrate: true) } label: {
+                    Label("Camtasia Project", systemImage: "square.and.arrow.up.on.square")
+                }
+                .controlSize(.large)
+                .disabled(busy != nil)
+                .help("Export as a Camtasia project with separate clips, narration and clicks, so you can add transitions and edit")
                 Button { export(.tutorial, narrate: true) } label: {
                     Label("Make Video", systemImage: "film")
                         .padding(.horizontal, 6)
@@ -699,6 +706,9 @@ if hasIntro {
         if format == .markdown {
             panel.nameFieldStringValue = Exporter.safeName(g.title)
             panel.message = "Pare Guide makes a folder with the Markdown file and its images."
+        } else if format == .camtasia {
+            panel.nameFieldStringValue = Exporter.safeName(g.title) + ".cmproj"
+            panel.message = "Makes a Camtasia project, plus a captions file (.srt) beside it."
         } else {
             panel.nameFieldStringValue = Exporter.safeName(g.title) + "." + format.ext
             panel.allowedContentTypes = [UTType(filenameExtension: format.ext) ?? .data]

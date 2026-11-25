@@ -77,6 +77,21 @@ enum TutorialVideo {
         let work = fm.temporaryDirectory.appendingPathComponent("tutorial-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
+        let (shots, look) = try await buildShots(guide: guide, work: work, progress: progress)
+
+        // 3. Pictures → silent video.
+        let silent = work.appendingPathComponent("silent.mp4")
+        try await writeVideo(shots, look: look, to: silent, progress: progress)
+
+        // 4. Sound: narration, clicks and any clip audio.
+        progress("Adding the sound…")
+        let click = work.appendingPathComponent("click.caf")
+        try writeClickSound(to: click)
+        try await mix(video: silent, shots: shots, click: click, to: url)
+    }
+
+    /// Plans every part of the video and records its narration (which sets how long each part lasts).
+    static func buildShots(guide: Guide, work: URL, progress: @escaping (String) -> Void) async throws -> ([Shot], Look) {
 
         let (brand, logoURL, introFile, outroFile, jobs) = await MainActor.run { () -> (Brand?, URL?, URL?, URL?, [(Step, URL?)]) in
             let bs = BrandStore.shared
@@ -151,16 +166,7 @@ enum TutorialVideo {
             }
         }
         guard !shots.isEmpty else { throw PGError("This guide has no steps with pictures yet.") }
-
-        // 3. Pictures → silent video.
-        let silent = work.appendingPathComponent("silent.mp4")
-        try await writeVideo(shots, look: look, to: silent, progress: progress)
-
-        // 4. Sound: narration, clicks and any clip audio.
-        progress("Adding the sound…")
-        let click = work.appendingPathComponent("click.caf")
-        try writeClickSound(to: click)
-        try await mix(video: silent, shots: shots, click: click, to: url)
+        return (shots, look)
     }
 
     static func clipDuration(_ url: URL) async throws -> Double {
@@ -242,7 +248,9 @@ enum TutorialVideo {
 
     // MARK: Video frames
 
-    static func writeVideo(_ shots: [Shot], look: Look, to url: URL, progress: @escaping (String) -> Void) async throws {
+    /// `fades`: crossfade between parts and fade in/out at the ends (off for Camtasia clips, where you add your own transitions).
+    static func writeVideo(_ shots: [Shot], look: Look, to url: URL, fades: Bool = true,
+                           progress: @escaping (String) -> Void) async throws {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -296,14 +304,14 @@ enum TutorialVideo {
                     ctx.interpolationQuality = .high
                     draw(shot, t: t, look: look, clip: clipReader, in: ctx)
                     // Crossfade from the end of the last part, or fade in/out at the very start and end.
-                    if si > 0, t < crossfade, let previous {
+                    if fades, si > 0, t < crossfade, let previous {
                         ctx.saveGState()
                         ctx.setAlpha(1 - seg(t, 0, crossfade))
                         ctx.draw(previous, in: CGRect(x: 0, y: 0, width: W, height: H))
                         ctx.restoreGState()
                     }
-                    if si == 0, t < 0.5 { fill(ctx, .white, alpha: 1 - seg(t, 0, 0.5)) }
-                    if isLastShot, t > shot.duration - 0.5 { fill(ctx, .white, alpha: seg(t, shot.duration - 0.5, shot.duration)) }
+                    if fades, si == 0, t < 0.5 { fill(ctx, .white, alpha: 1 - seg(t, 0, 0.5)) }
+                    if fades, isLastShot, t > shot.duration - 0.5 { fill(ctx, .white, alpha: seg(t, shot.duration - 0.5, shot.duration)) }
                     if f == n - 1 { endImage.set(ctx.makeImage()) }
                 }
                 if bufs.count > 1 {

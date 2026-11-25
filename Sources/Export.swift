@@ -11,6 +11,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
     case interactive = "Interactive demo (.html)"
     case markdown = "Markdown"
     case tutorial = "Tutorial video (.mp4)"
+    case camtasia = "Camtasia project (to edit)"
     case mp4 = "Simple slideshow video (.mp4)"
     case gif = "GIF"
     case bundle = "Pare Guide file (to share)"
@@ -22,6 +23,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         case .html, .interactive: return "html"
         case .markdown: return "md"
         case .mp4, .tutorial: return "mp4"
+        case .camtasia: return "cmproj"
         case .gif: return "gif"
         case .bundle: return "pareguide"
         }
@@ -60,6 +62,9 @@ enum Exporter {
             return
         case .tutorial:
             try await TutorialVideo.make(guide: guide, to: url, progress: progress)
+            return
+        case .camtasia:
+            try await CamtasiaExport.make(guide: guide, to: url, progress: progress)
             return
         case .mp4:
             progress("Rendering steps…")
